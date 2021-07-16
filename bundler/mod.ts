@@ -1,18 +1,14 @@
-import { dim } from 'https://deno.land/std@0.93.0/fmt/colors.ts'
-import { basename, dirname, join } from 'https://deno.land/std@0.93.0/path/mod.ts'
-import { ensureDir, } from 'https://deno.land/std@0.93.0/fs/ensure_dir.ts'
+import { dirname, join } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import { ensureDir } from 'https://deno.land/std@0.96.0/fs/ensure_dir.ts'
 import { transform } from '../compiler/mod.ts'
 import { trimModuleExt } from '../framework/core/module.ts'
-import { ensureTextFile, existsDirSync, existsFileSync, lazyRemove } from '../shared/fs.ts'
-import log from '../shared/log.ts'
+import { ensureTextFile, existsFile, lazyRemove } from '../shared/fs.ts'
 import util from '../shared/util.ts'
+import type { BrowserNames } from '../types.ts'
 import { VERSION } from '../version.ts'
 import type { Application, Module } from '../server/app.ts'
-import { cache } from '../server/cache.ts'
-import { computeHash, esbuild, stopEsbuild, getAlephPkgUri } from '../server/helper.ts'
-
-const hashShort = 8
-const reHashJS = new RegExp(`\\.[0-9a-f]{${hashShort}}\\.js$`, 'i')
+import { clearBuildCache, computeHash, getAlephPkgUri } from '../server/helper.ts'
+import { esbuild, stopEsbuild, esbuildUrlLoader } from './esbuild.ts'
 
 export const bundlerRuntimeCode = `
   window.__ALEPH = {
@@ -123,7 +119,8 @@ export class Bundler {
   }
 
   private async copyBundleFile(jsFilename: string) {
-    const { buildDir, outputDir } = this.#app
+    const { workingDir, buildDir, config } = this.#app
+    const outputDir = join(workingDir, config.outputDir)
     const bundleFile = join(buildDir, jsFilename)
     const saveAs = join(outputDir, '_aleph', jsFilename)
     await ensureDir(dirname(saveAs))
@@ -135,15 +132,16 @@ export class Bundler {
       return this.#compiled.get(mod.url)!
     }
 
-    const bundlingFile = util.trimSuffix(mod.jsFile, '.js') + '.bundling.js'
-    this.#compiled.set(mod.url, bundlingFile)!
-    if (existsFileSync(bundlingFile)) {
-      return bundlingFile
+    const jsFile = join(this.#app.buildDir, mod.jsFile.slice(0, -3) + '.client.js')
+    this.#compiled.set(mod.url, jsFile)
+
+    if (await existsFile(jsFile)) {
+      return jsFile
     }
 
-    const source = await this.#app.readModule(mod.url)
+    const source = await this.#app.loadModule(mod.url)
     if (source === null) {
-      this.#compiled.delete(mod.url)!
+      this.#compiled.delete(mod.url)
       throw new Error(`Unsupported module '${mod.url}'`)
     }
 
@@ -152,7 +150,7 @@ export class Bundler {
         mod.url,
         source.code,
         {
-          ...this.#app.sharedCompileOptions,
+          ...this.#app.commonCompileOptions,
           swcOptions: {
             sourceType: source.type,
           },
@@ -165,8 +163,8 @@ export class Bundler {
         for (let index = 0; index < starExports.length; index++) {
           const url = starExports[index]
           const names = await this.#app.parseModuleExportNames(url)
-          code = code.replace(`export * from "[${url}]:`, `export {${names.filter(name => name !== 'default').join(',')}} from "`)
-          code = code.replace(`export const $$star_${index}`, `export const {${names.filter(name => name !== 'default').join(',')}}`)
+          code = code.replaceAll(`export * from "[${url}]:`, `export {${names.filter(name => name !== 'default').join(',')}} from "`)
+          code = code.replaceAll(`export const $$star_${index}`, `export const {${names.filter(name => name !== 'default').join(',')}}`)
         }
       }
 
@@ -180,10 +178,10 @@ export class Bundler {
         }
       }))
 
-      await ensureTextFile(bundlingFile, code)
-      return bundlingFile
+      await ensureTextFile(jsFile, code)
+      return jsFile
     } catch (e) {
-      this.#compiled.delete(mod.url)!
+      this.#compiled.delete(mod.url)
       throw new Error(`Can't compile module '${mod.url}': ${e.message}`)
     }
   }
@@ -197,11 +195,10 @@ export class Bundler {
       }, {} as Record<string, string>)
     const mainJS = `__ALEPH.bundled=${JSON.stringify(bundled)};` + this.#app.getMainJS(true)
     const hash = computeHash(mainJS)
-    const bundleFilename = `main.bundle.${hash.slice(0, hashShort)}.js`
+    const bundleFilename = `main.bundle.${hash.slice(0, 8)}.js`
     const bundleFilePath = join(this.#app.buildDir, bundleFilename)
     await Deno.writeTextFile(bundleFilePath, mainJS)
     this.#bundled.set('main', bundleFilename)
-    log.info(`  {} main.js ${dim('• ' + util.formatBytes(mainJS.length))}`)
   }
 
   /** create polyfills bundle. */
@@ -210,24 +207,24 @@ export class Bundler {
     const { buildTarget } = this.#app.config
     const polyfillTarget = 'es' + (parseInt(buildTarget.slice(2)) + 1) // buildTarget + 1
     const hash = computeHash(polyfillTarget + '/esbuild@v0.11.11/' + VERSION)
-    const bundleFilename = `polyfills.bundle.${hash.slice(0, hashShort)}.js`
+    const bundleFilename = `polyfills.bundle.${hash.slice(0, 8)}.js`
     const bundleFilePath = join(this.#app.buildDir, bundleFilename)
-    if (!existsFileSync(bundleFilePath)) {
+    if (!await existsFile(bundleFilePath)) {
       const rawPolyfillsFile = `${alephPkgUri}/bundler/polyfills/${polyfillTarget}/mod.ts`
       await this.build(rawPolyfillsFile, bundleFilePath)
     }
     this.#bundled.set('polyfills', bundleFilename)
-    log.info(`  {} polyfills.js (${buildTarget.toUpperCase()}) ${dim('• ' + util.formatBytes(Deno.statSync(bundleFilePath).size))}`)
   }
 
   /** create bundle chunk. */
   private async bundleChunk(name: string, entry: string[], external: string[]) {
     const entryCode = (await Promise.all(entry.map(async (url, i) => {
+      const { buildDir } = this.#app
       let mod = this.#app.getModule(url)
       if (mod && mod.jsFile !== '') {
         if (external.length === 0) {
           return [
-            `import * as mod_${i} from ${JSON.stringify('file://' + mod.jsFile)}`,
+            `import * as mod_${i} from ${JSON.stringify('file://' + join(buildDir, mod.jsFile))}`,
             `__ALEPH.pack[${JSON.stringify(url)}] = mod_${i}`
           ]
         } else {
@@ -241,16 +238,15 @@ export class Bundler {
       return []
     }))).flat().join('\n')
     const hash = computeHash(entryCode + VERSION + Deno.version.deno)
-    const bundleFilename = `${name}.bundle.${hash.slice(0, hashShort)}.js`
+    const bundleFilename = `${name}.bundle.${hash.slice(0, 8)}.js`
     const bundleEntryFile = join(this.#app.buildDir, `${name}.bundle.entry.js`)
     const bundleFilePath = join(this.#app.buildDir, bundleFilename)
-    if (!existsFileSync(bundleFilePath)) {
+    if (!await existsFile(bundleFilePath)) {
       await Deno.writeTextFile(bundleEntryFile, entryCode)
       await this.build(bundleEntryFile, bundleFilePath)
       lazyRemove(bundleEntryFile)
     }
     this.#bundled.set(name, bundleFilename)
-    log.info(`  {} ${name}.js ${dim('• ' + util.formatBytes(Deno.statSync(bundleFilePath).size))}`)
   }
 
   /** run deno bundle and compress the output using terser. */
@@ -262,41 +258,15 @@ export class Bundler {
       entryPoints: [entryFile],
       outfile: bundleFile,
       platform: 'browser',
-      target: [String(buildTarget)].concat(browserslist.map(({ name, version }) => {
-        return `${name.toLowerCase()}${version}`
+      format: 'iife',
+      target: [String(buildTarget)].concat(Object.keys(browserslist).map(name => {
+        return `${name}${browserslist[name as BrowserNames]}`
       })),
       bundle: true,
       minify: true,
       treeShaking: true,
       sourcemap: false,
-      plugins: [{
-        name: 'http-loader',
-        setup(build) {
-          build.onResolve({ filter: /.*/ }, args => {
-            if (util.isLikelyHttpURL(args.path)) {
-              return {
-                path: args.path,
-                namespace: 'http-module',
-              }
-            }
-            if (args.namespace === 'http-module') {
-              return {
-                path: (new URL(args.path, args.importer)).toString(),
-                namespace: 'http-module',
-              }
-            }
-            const [path] = util.splitBy(util.trimPrefix(args.path, 'file://'), '#')
-            if (path.startsWith('.')) {
-              return { path: join(args.resolveDir, path) }
-            }
-            return { path }
-          })
-          build.onLoad({ filter: /.*/, namespace: 'http-module' }, async args => {
-            const { content } = await cache(args.path)
-            return { contents: content }
-          })
-        }
-      }],
+      plugins: [esbuildUrlLoader],
     })
   }
 }
@@ -306,22 +276,4 @@ export function simpleJSMinify(code: string) {
     .replace(/\s*([,:=|+]{1,2})\s+/g, '$1')
     .replaceAll(') {', '){')
   ).join('')
-}
-
-async function clearBuildCache(filename: string) {
-  const dir = dirname(filename)
-  const hashname = basename(filename)
-  if (!reHashJS.test(hashname) || !existsDirSync(dir)) {
-    return
-  }
-
-  const jsName = hashname.split('.').slice(0, -2).join('.') + '.js'
-  for await (const entry of Deno.readDir(dir)) {
-    if (entry.isFile && reHashJS.test(entry.name)) {
-      const _jsName = entry.name.split('.').slice(0, -2).join('.') + '.js'
-      if (_jsName === jsName && hashname !== entry.name) {
-        await Deno.remove(join(dir, entry.name))
-      }
-    }
-  }
 }

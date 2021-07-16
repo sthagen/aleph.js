@@ -1,6 +1,5 @@
 use crate::resolve::{is_remote_url, DependencyDescriptor, InlineStyle, Resolver};
 use crate::resolve_fold::create_aleph_pack_var_decl_member;
-
 use sha1::{Digest, Sha1};
 use std::{cell::RefCell, rc::Rc};
 use swc_common::{SourceMap, Spanned, DUMMY_SP};
@@ -69,13 +68,13 @@ impl AlephJsxFold {
         match name {
           "head" => {
             let mut resolver = self.resolver.borrow_mut();
-            resolver.used_builtin_jsx_tags.insert("Head".into());
+            resolver.builtin_jsx_tags.insert("Head".into());
             el.name = JSXElementName::Ident(quote_ident!("__ALEPH_Head"));
           }
 
           "script" => {
             let mut resolver = self.resolver.borrow_mut();
-            resolver.used_builtin_jsx_tags.insert("CustomScript".into());
+            resolver.builtin_jsx_tags.insert("CustomScript".into());
             el.name = JSXElementName::Ident(quote_ident!("__ALEPH_CustomScript"));
           }
 
@@ -103,7 +102,7 @@ impl AlephJsxFold {
             }
 
             if should_replace {
-              resolver.used_builtin_jsx_tags.insert("Anchor".into());
+              resolver.builtin_jsx_tags.insert("Anchor".into());
               el.name = JSXElementName::Ident(quote_ident!("__ALEPH_Anchor"));
             }
           }
@@ -166,7 +165,7 @@ impl AlephJsxFold {
               }
 
               if name.eq("link") {
-                resolver.used_builtin_jsx_tags.insert("StyleLink".into());
+                resolver.builtin_jsx_tags.insert("StyleLink".into());
                 el.name = JSXElementName::Ident(quote_ident!("__ALEPH_StyleLink"));
               }
             }
@@ -215,9 +214,10 @@ impl AlephJsxFold {
             let mut resolver = self.resolver.borrow_mut();
             resolver.dep_graph.push(DependencyDescriptor {
               specifier: "#".to_owned() + id.as_str(),
+              import_index: "".into(),
               is_dynamic: false,
             });
-            resolver.used_builtin_jsx_tags.insert("InlineStyle".into());
+            resolver.builtin_jsx_tags.insert("InlineStyle".into());
             el.name = JSXElementName::Ident(quote_ident!("__ALEPH_InlineStyle"));
             inline_style = Some((type_prop_value, id.into()));
           }
@@ -363,7 +363,7 @@ impl Fold for AlephJsxBuiltinModuleResolveFold {
     let extra_imports = self.resolver.borrow().extra_imports.clone();
     let mut resolver = self.resolver.borrow_mut();
 
-    for mut name in resolver.used_builtin_jsx_tags.clone() {
+    for mut name in resolver.builtin_jsx_tags.clone() {
       if name.eq("a") {
         name = "anchor".to_owned()
       }
@@ -427,7 +427,6 @@ impl Fold for AlephJsxBuiltinModuleResolveFold {
 
 #[cfg(test)]
 mod tests {
-  use crate::resolve::DependencyDescriptor;
   use crate::swc::st;
 
   #[test]
@@ -478,41 +477,24 @@ mod tests {
     assert!(code.contains("href: \"/style/index.css\""));
     assert!(code.contains(
       format!(
-        "import   \"../style/index.css.js#{}@000000\"",
+        "import   \"../style/index.css.js#{}@000002\"",
         "/style/index.css"
       )
       .as_str()
     ));
     let r = resolver.borrow_mut();
     assert_eq!(
-      r.dep_graph,
+      r.dep_graph
+        .iter()
+        .map(|g| { g.specifier.as_str() })
+        .collect::<Vec<&str>>(),
       vec![
-        DependencyDescriptor {
-          specifier: "https://esm.sh/react".into(),
-          is_dynamic: false,
-        },
-        DependencyDescriptor {
-          specifier: "/style/index.css".into(),
-          is_dynamic: false,
-        },
-        DependencyDescriptor {
-          specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/components/Head.ts".into(),
-          is_dynamic: false,
-        },
-        DependencyDescriptor {
-          specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/components/StyleLink.ts"
-            .into(),
-          is_dynamic: false,
-        },
-        DependencyDescriptor {
-          specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/components/Anchor.ts".into(),
-          is_dynamic: false,
-        },
-        DependencyDescriptor {
-          specifier: "https://deno.land/x/aleph@v0.3.0/framework/react/components/CustomScript.ts"
-            .into(),
-          is_dynamic: false,
-        }
+        "https://esm.sh/react",
+        "/style/index.css",
+        "https://deno.land/x/aleph@v0.3.0/framework/react/components/Head.ts",
+        "https://deno.land/x/aleph@v0.3.0/framework/react/components/StyleLink.ts",
+        "https://deno.land/x/aleph@v0.3.0/framework/react/components/Anchor.ts",
+        "https://deno.land/x/aleph@v0.3.0/framework/react/components/CustomScript.ts",
       ]
     );
   }

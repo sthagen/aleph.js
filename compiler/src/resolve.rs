@@ -1,5 +1,4 @@
 use crate::import_map::{ImportHashMap, ImportMap};
-
 use indexmap::IndexSet;
 use path_slash::PathBufExt;
 use pathdiff::diff_paths;
@@ -28,6 +27,7 @@ lazy_static! {
 #[serde(rename_all = "camelCase")]
 pub struct DependencyDescriptor {
   pub specifier: String,
+  pub import_index: String,
   pub is_dynamic: bool,
 }
 
@@ -56,8 +56,10 @@ pub struct Resolver {
   pub specifier_is_remote: bool,
   /// dependency graph
   pub dep_graph: Vec<DependencyDescriptor>,
-  /// inline styles
+  /// jsx inline styles
   pub inline_styles: HashMap<String, InlineStyle>,
+  /// use deno hooks
+  pub use_deno_hooks: Vec<String>,
   /// bundle mode
   pub bundle_mode: bool,
   /// bundled modules
@@ -67,9 +69,10 @@ pub struct Resolver {
   /// extra imports
   pub extra_imports: IndexSet<String>,
   /// builtin jsx tags like `a`, `link`, `head`, etc
-  pub used_builtin_jsx_tags: IndexSet<String>,
+  pub builtin_jsx_tags: IndexSet<String>,
 
   // private
+  import_idx: i32,
   import_map: ImportMap,
   aleph_pkg_uri: Option<String>,
   react: Option<ReactResolve>,
@@ -91,13 +94,15 @@ impl Resolver {
     Resolver {
       specifier: specifier.into(),
       specifier_is_remote: is_remote_url(specifier),
-      used_builtin_jsx_tags: IndexSet::new(),
       dep_graph: Vec::new(),
-      star_exports: Vec::new(),
       inline_styles: HashMap::new(),
+      use_deno_hooks: Vec::new(),
       bundle_mode,
       bundle_external: set,
+      star_exports: Vec::new(),
       extra_imports: IndexSet::new(),
+      builtin_jsx_tags: IndexSet::new(),
+      import_idx: 0,
       import_map: ImportMap::from_hashmap(import_map),
       aleph_pkg_uri,
       react,
@@ -117,7 +122,7 @@ impl Resolver {
 
   /// fix import/export url.
   //  - `https://esm.sh/react` -> `/-/esm.sh/react.js`
-  //  - `https://esm.sh/react@17.0.1?target=es2015&dev` -> `/-/esm.sh/[base64('target=es2015&dev')]react@17.0.1.js`
+  //  - `https://esm.sh/react@17.0.1?target=es2015&dev` -> `/-/esm.sh/react@17.0.1.[base64('target=es2015&dev')].js`
   //  - `http://localhost:8080/mod` -> `/-/http_localhost_8080/mod.js`
   //  - `/components/x/./logo.tsx` -> `/components/x/logo.tsx`
   //  - `/components/x/../logo.tsx` -> `/components/logo.tsx`
@@ -143,8 +148,8 @@ impl Resolver {
     let url = Url::from_str(url).unwrap();
     let path = Path::new(url.path());
     let mut path_buf = path.to_owned();
-    let mut ext = ".".to_owned();
-    ext.push_str(match path.extension() {
+    let mut extname = ".".to_owned();
+    extname.push_str(match path.extension() {
       Some(os_str) => match os_str.to_str() {
         Some(s) => {
           if RE_ENDS_WITH_VERSION.is_match(url.path()) {
@@ -159,22 +164,24 @@ impl Resolver {
     });
     if let Some(os_str) = path.file_name() {
       if let Some(s) = os_str.to_str() {
+        let extname = extname.as_str();
         let mut file_name = "".to_owned();
+        if s.ends_with(extname) {
+          file_name.push_str(s.trim_end_matches(extname));
+        } else {
+          file_name.push_str(s);
+        }
         if let Some(q) = url.query() {
-          file_name.push('[');
+          file_name.push('.');
           file_name.push_str(
             base64::encode(q)
-              .replace("+", "")
-              .replace("/", "")
+              .replace("+", "-")
+              .replace("/", "_")
               .replace("=", "")
               .as_str(),
           );
-          file_name.push(']');
         }
-        file_name.push_str(s);
-        if !file_name.ends_with(ext.as_str()) {
-          file_name.push_str(ext.as_str());
-        }
+        file_name.push_str(extname);
         path_buf.set_file_name(file_name);
       }
     }
@@ -192,7 +199,7 @@ impl Resolver {
         p.push_str(port.to_string().as_str());
       }
     }
-    p.push_str(path_buf.to_str().unwrap());
+    p.push_str(path_buf.to_slash().unwrap().as_str());
     p
   }
 
@@ -342,6 +349,8 @@ impl Resolver {
         }
       }
     };
+    self.import_idx = self.import_idx + 1;
+    let import_index = format!("{:0>6}", self.import_idx.to_string());
     // fix extension & add hash placeholder
     match resolved_path.extension() {
       Some(os_str) => match os_str.to_str() {
@@ -355,13 +364,14 @@ impl Resolver {
               .trim_end_matches(s)
               .to_owned();
             if self.bundle_mode && !is_dynamic {
-              filename.push_str("bundling.");
+              filename.push_str("client.");
             }
             filename.push_str("js");
             if !(self.bundle_mode && !is_dynamic) && !is_remote && !self.specifier_is_remote {
-              filename.push_str("#");
+              filename.push('#');
               filename.push_str(fixed_url.as_str());
-              filename.push_str("@000000");
+              filename.push('@');
+              filename.push_str(import_index.as_str());
             }
             resolved_path.set_file_name(filename);
           }
@@ -373,13 +383,14 @@ impl Resolver {
               .unwrap()
               .to_owned();
             if self.bundle_mode && !is_dynamic {
-              filename.push_str(".bundling");
+              filename.push_str(".client");
             }
             filename.push_str(".js");
             if !(self.bundle_mode && !is_dynamic) && !is_remote && !self.specifier_is_remote {
               filename.push('#');
               filename.push_str(fixed_url.as_str());
-              filename.push_str("@000000");
+              filename.push('@');
+              filename.push_str(import_index.as_str());
             }
             resolved_path.set_file_name(filename);
           }
@@ -390,6 +401,7 @@ impl Resolver {
     };
     self.dep_graph.push(DependencyDescriptor {
       specifier: fixed_url.clone(),
+      import_index,
       is_dynamic,
     });
     let path = resolved_path.to_slash().unwrap();
@@ -426,7 +438,11 @@ mod tests {
     );
     assert_eq!(
       resolver.fix_import_url("https://esm.sh/react@17.0.1?target=es2015&dev"),
-      "/-/esm.sh/[dGFyZ2V0PWVzMjAxNSZkZXY]react@17.0.1.js"
+      "/-/esm.sh/react@17.0.1.dGFyZ2V0PWVzMjAxNSZkZXY.js"
+    );
+    assert_eq!(
+      resolver.fix_import_url("https://cdn.esm.sh/v1/react@17.0.1/deno/react.js?target=es2015&dev"),
+      "/-/cdn.esm.sh/v1/react@17.0.1/deno/react.dGFyZ2V0PWVzMjAxNSZkZXY.js"
     );
     assert_eq!(
       resolver.fix_import_url("http://localhost:8080/mod"),
@@ -563,14 +579,14 @@ mod tests {
     assert_eq!(
       resolver.resolve("../components/logo.tsx", false),
       (
-        "../components/logo.js#/components/logo.tsx@000000".into(),
+        "../components/logo.js#/components/logo.tsx@000012".into(),
         "/components/logo.tsx".into()
       )
     );
     assert_eq!(
       resolver.resolve("../styles/app.css", false),
       (
-        "../styles/app.css.js#/styles/app.css@000000".into(),
+        "../styles/app.css.js#/styles/app.css@000013".into(),
         "/styles/app.css".into()
       )
     );
@@ -584,14 +600,14 @@ mod tests {
     assert_eq!(
       resolver.resolve("@/components/logo.tsx", false),
       (
-        "../components/logo.js#/components/logo.tsx@000000".into(),
+        "../components/logo.js#/components/logo.tsx@000015".into(),
         "/components/logo.tsx".into()
       )
     );
     assert_eq!(
       resolver.resolve("~/components/logo.tsx", false),
       (
-        "../components/logo.js#/components/logo.tsx@000000".into(),
+        "../components/logo.js#/components/logo.tsx@000016".into(),
         "/components/logo.tsx".into()
       )
     );

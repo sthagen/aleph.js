@@ -1,5 +1,4 @@
-use crate::resolve::{DependencyDescriptor, Resolver};
-
+use crate::resolve::Resolver;
 use sha1::{Digest, Sha1};
 use std::{cell::RefCell, rc::Rc};
 use swc_common::{SourceMap, Span, DUMMY_SP};
@@ -13,7 +12,7 @@ pub fn resolve_fold(
   resolve_star_exports: bool,
 ) -> impl Fold {
   ResolveFold {
-    deno_hooks_idx: 0,
+    use_deno_idx: 0,
     resolver,
     source,
     resolve_star_exports,
@@ -21,7 +20,7 @@ pub fn resolve_fold(
 }
 
 pub struct ResolveFold {
-  deno_hooks_idx: i32,
+  use_deno_idx: i32,
   resolver: Rc<RefCell<Resolver>>,
   source: Rc<SourceMap>,
   resolve_star_exports: bool,
@@ -30,12 +29,12 @@ pub struct ResolveFold {
 impl ResolveFold {
   fn new_use_deno_hook_ident(&mut self, callback_span: &Span) -> String {
     let resolver = self.resolver.borrow_mut();
-    self.deno_hooks_idx = self.deno_hooks_idx + 1;
+    self.use_deno_idx = self.use_deno_idx + 1;
     let mut ident: String = "useDeno-".to_owned();
     let mut hasher = Sha1::new();
     let callback_code = self.source.span_to_snippet(callback_span.clone()).unwrap();
     hasher.update(resolver.specifier.clone());
-    hasher.update(self.deno_hooks_idx.to_string());
+    hasher.update(self.use_deno_idx.to_string());
     hasher.update(callback_code.clone());
     ident.push_str(
       base64::encode(hasher.finalize())
@@ -345,6 +344,7 @@ impl Fold for ResolveFold {
             ..
           }) => Some(span),
           Expr::Arrow(ArrowExpr { span, .. }) => Some(span),
+          Expr::Ident(Ident { span, .. }) => Some(span),
           _ => None,
         },
         _ => None,
@@ -377,10 +377,7 @@ impl Fold for ResolveFold {
           });
         }
         let mut resolver = self.resolver.borrow_mut();
-        resolver.dep_graph.push(DependencyDescriptor {
-          specifier: "#".to_owned() + id.clone().as_str(),
-          is_dynamic: false,
-        });
+        resolver.use_deno_hooks.push(id.into());
       }
     }
 
@@ -622,10 +619,10 @@ mod tests {
     assert!(code.contains("import { useDeno } from \"../-/deno.land/x/aleph@v1.0.0/hooks.js\""));
     assert!(code.contains("import { render } from \"../-/esm.sh/react-dom@17.0.2/server.js\""));
     assert!(code.contains("import { render as _render } from \"../-/cdn.esm.sh/v2/react-dom@17.0.2/es2020/react-dom.js\""));
-    assert!(code.contains("import Logo from \"../component/logo.js#/component/logo.tsx@000000\""));
-    assert!(code.contains("import Logo2 from \"../component/logo.js#/component/logo.tsx@000000\""));
-    assert!(code.contains("import Logo3 from \"../component/logo.js#/component/logo.tsx@000000\""));
-    assert!(code.contains("const AsyncLogo = React.lazy(()=>import(\"../components/async-logo.js#/components/async-logo.tsx@000000\")"));
+    assert!(code.contains("import Logo from \"../component/logo.js#/component/logo.tsx@000006\""));
+    assert!(code.contains("import Logo2 from \"../component/logo.js#/component/logo.tsx@000007\""));
+    assert!(code.contains("import Logo3 from \"../component/logo.js#/component/logo.tsx@000008\""));
+    assert!(code.contains("const AsyncLogo = React.lazy(()=>import(\"../components/async-logo.js#/components/async-logo.tsx@000009\")"));
     assert!(code.contains("export { useState } from \"../-/esm.sh/react@17.0.2.js\""));
     assert!(code.contains("export * from \"[https://esm.sh/swr]:../-/esm.sh/swr.js\""));
   }
@@ -634,11 +631,16 @@ mod tests {
   fn sign_use_deno_hook() {
     let specifer = "/pages/index.tsx";
     let source = r#"
+      const callback = async () => {
+        return {}
+      }
+
       export default function Index() {
         const verison = useDeno(() => Deno.version)
         const data = useDeno(async function() {
           return await readJson("./data.json")
         }, 1000)
+        const data = useDeno(callback, 1000, "ID")
         return null
       }
     "#;
@@ -649,8 +651,8 @@ mod tests {
     hasher.update("() => Deno.version");
     let id_1 = base64::encode(hasher.finalize())
       .replace("/", "")
-      .replace("+", "");
-    let id_1 = id_1.trim_end_matches('=');
+      .replace("+", "")
+      .replace("=", "");
 
     let mut hasher = Sha1::new();
     hasher.update(specifer.clone());
@@ -661,18 +663,28 @@ mod tests {
         }"#,
     );
     let id_2 = base64::encode(hasher.finalize())
+      .replace("+", "")
       .replace("/", "")
-      .replace("+", "");
-    let id_2 = id_2.trim_end_matches('=');
+      .replace("=", "");
 
-    for _ in 0..3 {
-      let (code, _) = st(specifer, source, false);
-      assert!(code.contains(format!(", null, \"useDeno-{}\"", id_1).as_str()));
-      assert!(code.contains(format!(", 1000, \"useDeno-{}\"", id_2).as_str()));
-      let (code, _) = st(specifer, source, true);
-      assert!(code.contains(format!("null, null, \"useDeno-{}\"", id_1).as_str()));
-      assert!(code.contains(format!("null, 1000, \"useDeno-{}\"", id_2).as_str()));
-    }
+    let mut hasher = Sha1::new();
+    hasher.update(specifer.clone());
+    hasher.update("3");
+    hasher.update("callback");
+    let id_3 = base64::encode(hasher.finalize())
+      .replace("+", "")
+      .replace("/", "")
+      .replace("=", "");
+
+    let (code, _) = st(specifer, source, false);
+    assert!(code.contains(format!(", null, \"useDeno-{}\"", id_1).as_str()));
+    assert!(code.contains(format!(", 1000, \"useDeno-{}\"", id_2).as_str()));
+    assert!(code.contains(format!(", 1000, \"useDeno-{}\"", id_3).as_str()));
+
+    let (code, _) = st(specifer, source, true);
+    assert!(code.contains(format!("null, null, \"useDeno-{}\"", id_1).as_str()));
+    assert!(code.contains(format!("null, 1000, \"useDeno-{}\"", id_2).as_str()));
+    assert!(code.contains(format!("null, 1000, \"useDeno-{}\"", id_3).as_str()));
   }
 
   #[test]
@@ -733,12 +745,12 @@ mod tests {
       .transform(resolver.clone(), &EmitOptions::default())
       .expect("could not transform module");
     println!("{}", code);
-    assert!(code.contains("const { default: React , useState , useEffect: useEffect_  } = __ALEPH.pack[\"https://esm.sh/react\"]"));
+    assert!(code.contains("const { /*#__PURE__*/ default: React , useState , useEffect: useEffect_  } = __ALEPH.pack[\"https://esm.sh/react\"]"));
     assert!(code.contains("const React_ = __ALEPH.pack[\"https://esm.sh/react\"]"));
     assert!(code.contains("const { default: Logo  } = __ALEPH.pack[\"/components/logo.tsx\"]"));
-    assert!(code.contains("import Nav from \"../components/nav.bundling.js\""));
+    assert!(code.contains("import Nav from \"../components/nav.client.js\""));
     assert!(!code.contains("__ALEPH.pack[\"/shared/iife.ts\"]"));
-    assert!(code.contains("import   \"../shared/iife2.bundling.js\""));
+    assert!(code.contains("import   \"../shared/iife2.client.js\""));
     assert!(
       code.contains("AsyncLogo = React.lazy(()=>__ALEPH.import(\"/components/async-logo.tsx\"")
     );
@@ -746,10 +758,10 @@ mod tests {
       "const { default: __ALEPH_Head  } = __ALEPH.pack[\"https://deno.land/x/aleph/framework/react/components/Head.ts\"]"
     ));
     assert!(code.contains(
-      "import __ALEPH_StyleLink from \"../-/deno.land/x/aleph/framework/react/components/StyleLink.bundling.js\""
+      "import __ALEPH_StyleLink from \"../-/deno.land/x/aleph/framework/react/components/StyleLink.client.js\""
     ));
-    assert!(code.contains("import   \"../-/esm.sh/tailwindcss/dist/tailwind.min.css.bundling.js\""));
-    assert!(code.contains("import   \"../style/index.css.bundling.js\""));
+    assert!(code.contains("import   \"../-/esm.sh/tailwindcss/dist/tailwind.min.css.client.js\""));
+    assert!(code.contains("import   \"../style/index.css.client.js\""));
     assert!(code.contains("export const $$star_0 = __ALEPH.pack[\"https://esm.sh/react\"]"));
     assert!(code.contains("export const ReactDom = __ALEPH.pack[\"https://esm.sh/react-dom\"]"));
     assert!(code.contains("export const { render  } = __ALEPH.pack[\"https://esm.sh/react-dom\"]"));

@@ -22,16 +22,16 @@ You will need [Deno](https://deno.land/) 1.8+.
 
 ```bash
 # ssr/development with HMR
-ALEPH_DEV=true deno run -A --unstable --import-map=./import_map.json cli.ts dev ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://0.0.0.0 cli.ts dev ./examples/hello-world -L debug
 
 # ssr/production
-ALEPH_DEV=true deno run -A --unstable --import-map=./import_map.json cli.ts start ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://0.0.0.0 cli.ts start ./examples/hello-world -L debug
 
 # ssg
-ALEPH_DEV=true deno run -A --unstable --import-map=./import_map.json cli.ts build ./examples/hello-world -L debug
+ALEPH_DEV=true deno run -A --unstable --location=http://0.0.0.0 cli.ts build ./examples/hello-world -L debug
 
 # run all tests
-deno test -A --unstable --location=http://localhost --import-map=./import_map.json
+deno test -A --unstable --location=http://0.0.0.0 --import-map=./import_map.json
 ```
 
 ## Project Structure
@@ -47,38 +47,6 @@ deno test -A --unstable --location=http://localhost --import-map=./import_map.js
 - **/plugins** plugins
 - **/server** server code
 - **/shared** shared code
-
-## Commit Message Guidelines
-
-We have very precise rules over how our git commit messages can be formatted. This leads to **more
-readable messages** that are easy to follow when looking through the **project history**.
-
-### Commit Message Format
-
-Each commit message consists of a **header**, a **body** and a **footer**. The header has a special
-format that includes a **type**, a **scope** and a **subject**:
-
-```
-<type>(<scope>): <subject>
-<BLANK LINE>
-<body>
-<BLANK LINE>
-<footer>
-```
-
-The **header** is mandatory and the **scope** of the header is optional.
-
-Any line of the commit message cannot be longer 100 characters! This allows the message to be easier
-to read on GitHub as well as in various git tools.
-
-Footer should contain a [closing reference to an issue](https://help.github.com/articles/closing-issues-via-commit-messages/) if any.
-
-Samples:
-
-```
-docs(changelog): update change log to 0.0.9
-```
-
 
 ## Code of Conduct
 

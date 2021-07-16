@@ -1,28 +1,70 @@
-import { dim, red, yellow } from 'https://deno.land/std@0.93.0/fmt/colors.ts'
-import { createHash } from 'https://deno.land/std@0.93.0/hash/mod.ts'
-import { relative } from 'https://deno.land/std@0.93.0/path/mod.ts'
-import { existsDirSync } from '../shared/fs.ts'
+import { dim, red, yellow } from 'https://deno.land/std@0.96.0/fmt/colors.ts'
+import { createHash } from 'https://deno.land/std@0.96.0/hash/mod.ts'
+import { dirname, basename, extname, join, relative } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import { minDenoVersion } from '../shared/constants.ts'
+import { existsDir } from '../shared/fs.ts'
+import log from '../shared/log.ts'
 import util from '../shared/util.ts'
+import { SourceType } from '../compiler/mod.ts'
 import type { ServerPlugin, LoaderPlugin } from '../types.ts'
 import { VERSION } from '../version.ts'
 import { localProxy } from './localproxy.ts'
 
-// @deno-types="https://deno.land/x/esbuild@v0.11.11/mod.d.ts"
-export { build as esbuild, stop as stopEsbuild } from 'https://deno.land/x/esbuild@v0.11.11/mod.js'
+// inject browser navigator polyfill
+Object.assign((globalThis as any).navigator, {
+  connection: {
+    downlink: 10,
+    effectiveType: '4g',
+    onchange: null,
+    rtt: 50,
+    saveData: false,
+  },
+  cookieEnabled: false,
+  language: 'en',
+  languages: ['en'],
+  onLine: true,
+  platform: Deno.build.os,
+  userAgent: `Deno/${Deno.version.deno}`,
+  vendor: 'Deno Land'
+})
 
-export const reLocaleID = /^[a-z]{2}(-[a-zA-Z0-9]+)?$/
-export const reFullVersion = /@v?\d+\.\d+\.\d+/i
+let _denoDir: string | null = null
+let _localProxy = false
 
-let __denoDir: string | null = null
-let __localProxy = false
+export const moduleWalkOptions = {
+  includeDirs: false,
+  skip: [
+    /(^|\/|\\)\./,
+    /\.d\.ts$/i,
+    /(\.|_)(test|spec|e2e)\.[a-z]+$/i
+  ]
+}
 
-/** check whether should proxy https://deno.land/x/aleph on localhost. */
+export function checkDenoVersion() {
+  const [currentMajor, currentMinor, currentPatch] = Deno.version.deno.split('.').map(p => parseInt(p))
+  const [major, minor, patch] = minDenoVersion.split('.').map(p => parseInt(p))
+
+  if (currentMajor > major) return
+  if (currentMajor === major && currentMinor > minor) return
+  if (currentMajor === major && currentMinor === minor && currentPatch >= patch) return
+
+  log.error(`Aleph.js needs Deno ${minDenoVersion}+, please upgrade Deno.`)
+  Deno.exit(1)
+}
+
 export function checkAlephDev() {
   const v = Deno.env.get('ALEPH_DEV')
-  if (v !== undefined && !__localProxy) {
+  if (v !== undefined && !_localProxy) {
     localProxy(Deno.cwd(), 2020)
-    __localProxy = true
+    _localProxy = true
   }
+}
+
+const reLocalUrl = /^https?:\/\/(localhost|0\.0\.0\.0|127\.0\.0\.1)(\:|\/|$)/
+
+/** check whether it is a localhost url. */
+export function isLocalUrl(url: string): boolean {
+  return reLocalUrl.test(url)
 }
 
 /** check the plugin whether it is a loader. */
@@ -32,8 +74,8 @@ export function isLoaderPlugin(plugin: LoaderPlugin | ServerPlugin): plugin is L
 
 /** get the deno cache dir. */
 export async function getDenoDir() {
-  if (__denoDir !== null) {
-    return __denoDir
+  if (_denoDir !== null) {
+    return _denoDir
   }
 
   const p = Deno.run({
@@ -44,10 +86,10 @@ export async function getDenoDir() {
   const output = (new TextDecoder).decode(await p.output())
   const { denoDir } = JSON.parse(output)
   p.close()
-  if (denoDir === undefined || !existsDirSync(denoDir)) {
+  if (denoDir === undefined || !await existsDir(denoDir)) {
     throw new Error(`can't find the deno dir`)
   }
-  __denoDir = denoDir
+  _denoDir = denoDir
   return denoDir
 }
 
@@ -60,8 +102,8 @@ export function getAlephPkgUri() {
   return `https://deno.land/x/aleph@v${VERSION}`
 }
 
-/** get relative the path of `to` to `from`. */
-export function getRelativePath(from: string, to: string): string {
+/** get the relative path from `from` to `to`. */
+export function toRelativePath(from: string, to: string): string {
   const r = relative(from, to).split('\\').join('/')
   if (!r.startsWith('.') && !r.startsWith('/')) {
     return './' + r
@@ -69,8 +111,47 @@ export function getRelativePath(from: string, to: string): string {
   return r
 }
 
-/** fix remote import url to local */
-export function toLocalUrl(url: string): string {
+/** get source type by given url and content type. */
+export function getSourceType(url: string, contentType?: string): SourceType {
+  if (util.isNEString(contentType)) {
+    switch (contentType.split(';')[0].trim()) {
+      case 'application/javascript':
+      case 'text/javascript':
+        return SourceType.JS
+      case 'text/jsx':
+        return SourceType.JSX
+      case 'text/typescript':
+        if (url.endsWith('.tsx')) {
+          return SourceType.TSX
+        }
+        return SourceType.TS
+      case 'text/tsx':
+        return SourceType.TSX
+      case 'text/css':
+        return SourceType.CSS
+    }
+  }
+  switch (extname(url)) {
+    case '.mjs':
+    case '.js':
+      return SourceType.JS
+    case '.jsx':
+      return SourceType.JSX
+    case '.ts':
+      return SourceType.TS
+    case '.tsx':
+      return SourceType.TSX
+    case '.css':
+      return SourceType.CSS
+  }
+  return SourceType.Unknown
+}
+
+/**
+ * fix remote import url to local
+ * https://esm.sh/react.js?bundle -> /-/esm.sh/react.YnVuZGxl.js
+ */
+export function toLocalPath(url: string): string {
   if (util.isLikelyHttpURL(url)) {
     let { hostname, pathname, port, protocol, search } = new URL(url)
     const isHttp = protocol === 'http:'
@@ -79,9 +160,10 @@ export function toLocalUrl(url: string): string {
     }
     if (search !== '') {
       const a = util.splitPath(pathname)
-      const searchKey = btoa(search.slice(1)).replace(/[+/=]/g, '')
-      const basename = `[${searchKey}]${a.pop()}`
-      a.push(basename)
+      const basename = a.pop()!
+      const ext = extname(basename)
+      const search64 = util.btoaUrl(search.slice(1))
+      a.push(util.trimSuffix(basename, ext) + `.${search64}` + ext)
       pathname = '/' + a.join('/')
     }
     return [
@@ -114,4 +196,23 @@ export function formatBytesWithColor(bytes: number) {
     cf = yellow
   }
   return cf(util.formatBytes(bytes))
+}
+
+export async function clearBuildCache(filename: string, ext = 'js') {
+  const dir = dirname(filename)
+  const hashname = basename(filename)
+  const regHashExt = new RegExp(`\\.[0-9a-f]+\\.${ext}$`, 'i')
+  if (ext && !regHashExt.test(hashname) || !await existsDir(dir)) {
+    return
+  }
+
+  const jsName = hashname.split('.').slice(0, -2).join('.') + '.' + ext
+  for await (const entry of Deno.readDir(dir)) {
+    if (entry.isFile && regHashExt.test(entry.name)) {
+      const _jsName = entry.name.split('.').slice(0, -2).join('.') + '.' + ext
+      if (_jsName === jsName && hashname !== entry.name) {
+        await Deno.remove(join(dir, entry.name))
+      }
+    }
+  }
 }

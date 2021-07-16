@@ -1,7 +1,7 @@
-import { createElement, ComponentType, ReactElement } from 'react'
-import { renderToString } from 'react-dom/server'
+import { createElement, ComponentType, ReactElement } from 'https://esm.sh/react@17.0.2'
+import { renderToString } from 'https://esm.sh/react-dom@17.0.2/server'
 import util from '../../shared/util.ts'
-import type { FrameworkRenderResult } from '../../server/renderer.ts'
+import type { FrameworkRenderResult } from '../../server/ssr.ts'
 import type { RouterURL } from '../../types.ts'
 import events from '../core/events.ts'
 import { RouterContext, SSRContext } from './context.ts'
@@ -10,17 +10,17 @@ import { AsyncUseDenoError } from './hooks.ts'
 import { isLikelyReactComponent } from './helper.ts'
 import { createPageProps } from './pageprops.ts'
 
-export type RendererStorage = {
+export type RendererStore = {
   headElements: Map<string, { type: string, props: Record<string, any> }>
-  scripts: Map<string, { props: Record<string, any> }>
   inlineStyles: Map<string, string>
+  scripts: Map<string, { props: Record<string, any> }>
 }
 
 export async function render(
   url: RouterURL,
   App: ComponentType<any> | undefined,
   nestedPageComponents: { url: string, Component?: any }[],
-  styles: Record<string, string>
+  styles: Record<string, { css?: string, href?: string }>
 ): Promise<FrameworkRenderResult> {
   const global = globalThis as any
   const ret: FrameworkRenderResult = {
@@ -29,13 +29,12 @@ export async function render(
     scripts: [],
     data: null,
   }
-  const rendererStorage: RendererStorage = {
+  const rendererStore: RendererStore = {
     headElements: new Map(),
-    scripts: new Map(),
     inlineStyles: new Map(),
+    scripts: new Map(),
   }
-  const qs = url.query.toString()
-  const dataUrl = 'pagedata://' + [url.pathname, qs].filter(Boolean).join('?')
+  const dataUrl = 'pagedata://' + url.toString()
   const asyncCalls: Array<[string, number, Promise<any>]> = []
   const data: Record<string, any> = {}
   const renderingData: Record<string, any> = {}
@@ -88,9 +87,10 @@ export async function render(
           data[id] = { value, expires }
         })
       }
+      Object.keys(rendererStore).forEach(key => rendererStore[key as keyof typeof rendererStore].clear())
       ret.body = renderToString(createElement(
         SSRContext.Provider,
-        { value: rendererStorage },
+        { value: rendererStore },
         createElement(
           RouterContext.Provider,
           { value: url },
@@ -112,7 +112,7 @@ export async function render(
   }
 
   // insert head child tags
-  rendererStorage.headElements.forEach(({ type, props }) => {
+  rendererStore.headElements.forEach(({ type, props }) => {
     const { children, ...rest } = props
     if (type === 'title') {
       if (util.isNEString(children)) {
@@ -135,7 +135,7 @@ export async function render(
   })
 
   // insert script tags
-  rendererStorage.scripts.forEach(({ props }) => {
+  rendererStore.scripts.forEach(({ props }) => {
     const { children, dangerouslySetInnerHTML, ...attrs } = props
     if (dangerouslySetInnerHTML && util.isNEString(dangerouslySetInnerHTML.__html)) {
       ret.scripts.push({ ...attrs, innerText: dangerouslySetInnerHTML.__html })
@@ -149,14 +149,14 @@ export async function render(
   })
 
   // insert styles
-  Object.entries(styles).forEach(([url, css]) => {
+  Object.entries(styles).forEach(([url, { css, href }]) => {
     if (css) {
       ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
-    } else if (util.isLikelyHttpURL(url)) {
-      ret.head.push(`<link rel="stylesheet" href="${url}" data-module-id=${JSON.stringify(url)} ssr />`)
+    } else if (href) {
+      ret.head.push(`<link rel="stylesheet" href=${JSON.stringify(href)} data-module-id=${JSON.stringify(url)} ssr />`)
     }
   })
-  for (const [url, css] of rendererStorage.inlineStyles.entries()) {
+  for (const [url, css] of rendererStore.inlineStyles.entries()) {
     ret.head.push(`<style type="text/css" data-module-id=${JSON.stringify(url)} ssr>${css}</style>`)
   }
 

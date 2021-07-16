@@ -1,37 +1,45 @@
-import { bold } from 'https://deno.land/std@0.93.0/fmt/colors.ts'
-import { basename, join } from 'https://deno.land/std@0.93.0/path/mod.ts'
-import type { ImportMap, ReactResolve } from '../compiler/mod.ts'
+import { join } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import type { ReactResolve } from '../compiler/mod.ts'
 import { defaultReactVersion } from '../shared/constants.ts'
-import { existsDirSync, existsFileSync } from '../shared/fs.ts'
+import { existsDir, existsFile } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
-import type { Config, CSSOptions, PostCSSPlugin } from '../types.ts'
-import { VERSION } from '../version.ts'
-import { getAlephPkgUri, reLocaleID } from './helper.ts'
+import cssLoader from '../plugins/css.ts'
+import type { Config, ImportMap, PostCSSPlugin, LoaderPlugin } from '../types.ts'
+import { getAlephPkgUri } from './helper.ts'
+
+const builtinCSSLoader = cssLoader()
 
 export type RequiredConfig = Required<Config> & {
   react: ReactResolve
 }
 
-export const defaultConfig: Readonly<RequiredConfig> = {
-  framework: 'react',
-  buildTarget: 'es2015',
-  browserslist: [],
-  basePath: '/',
-  srcDir: '/',
-  outputDir: '/dist',
-  defaultLocale: 'en',
-  locales: [],
-  rewrites: {},
-  ssr: {},
-  plugins: [],
-  css: {},
-  headers: {},
-  compress: true,
-  env: {},
-  react: {
-    version: defaultReactVersion,
-    esmShBuildVersion: 40,
+export function defaultConfig(): Readonly<RequiredConfig> {
+  return {
+    framework: 'react',
+    buildTarget: 'es2015',
+    browserslist: {},
+    basePath: '/',
+    srcDir: '/',
+    outputDir: '/dist',
+    defaultLocale: 'en',
+    locales: [],
+    rewrites: {},
+    ssr: {},
+    plugins: [],
+    css: {
+      extractSize: 8 * 1024,
+      remoteExternal: false,
+      modules: false,
+      postcss: { plugins: ['autoprefixer'] }
+    },
+    headers: {},
+    compress: true,
+    env: {},
+    react: {
+      version: defaultReactVersion,
+      esmShBuildVersion: 41,
+    }
   }
 }
 
@@ -40,7 +48,7 @@ export async function loadConfig(workingDir: string): Promise<Config> {
   let data: Record<string, any> = {}
   for (const name of ['ts', 'js', 'json'].map(ext => 'aleph.config.' + ext)) {
     const p = join(workingDir, name)
-    if (existsFileSync(p)) {
+    if (await existsFile(p)) {
       if (name.endsWith('.json')) {
         const v = JSON.parse(await Deno.readTextFile(p))
         if (util.isPlainObject(v)) {
@@ -84,8 +92,8 @@ export async function loadConfig(workingDir: string): Promise<Config> {
   if (util.isNEString(srcDir)) {
     config.srcDir = util.cleanPath(srcDir)
   } else if (
-    !existsDirSync(join(workingDir, 'pages')) &&
-    existsDirSync(join(workingDir, 'src', 'pages'))
+    !await existsDir(join(workingDir, 'pages')) &&
+    await existsDir(join(workingDir, 'src', 'pages'))
   ) {
     config.srcDir = '/src'
   }
@@ -98,7 +106,7 @@ export async function loadConfig(workingDir: string): Promise<Config> {
   if (isBuildTarget(buildTarget)) {
     config.buildTarget = buildTarget
   }
-  if (util.isNEArray(browserslist)) {
+  if (util.isPlainObject(browserslist)) {
     config.browserslist = browserslist
   }
   if (isLocaleID(defaultLocale)) {
@@ -116,25 +124,30 @@ export async function loadConfig(workingDir: string): Promise<Config> {
     config.ssr = { include, exclude }
   }
   if (util.isPlainObject(rewrites)) {
-    config.rewrites = toPlainStringRecord(rewrites)
+    config.rewrites = toStringRecord(rewrites)
   }
   if (util.isPlainObject(headers)) {
-    config.headers = toPlainStringRecord(headers)
+    config.headers = toStringRecord(headers)
   }
   if (typeof compress === 'boolean') {
     config.compress = compress
   }
   if (util.isPlainObject(env)) {
-    config.env = toPlainStringRecord(env)
+    config.env = toStringRecord(env)
     Object.entries(env).forEach(([key, value]) => Deno.env.set(key, value))
   }
   if (util.isNEArray(plugins)) {
-    config.plugins = plugins
+    config.plugins = [builtinCSSLoader, ...plugins.filter(v => v && util.isNEString(v.type))]
+  } else {
+    config.plugins = [builtinCSSLoader]
   }
   if (util.isPlainObject(css)) {
+    const { extractSize, remoteExternal, modules, postcss } = css
     config.css = {
-      modules: util.isPlainObject(css.modules) ? css.modules : false,
-      postcss: isPostcssConfig(css.postcss) ? css.postcss : defaultConfig.css.postcss
+      extractSize: typeof extractSize === 'number' && !Number.isNaN(extractSize) ? extractSize : 8 * 1024,
+      remoteExternal: Boolean(remoteExternal),
+      modules: util.isPlainObject(modules) ? modules : Boolean(modules),
+      postcss: isPostcssConfig(postcss) ? postcss : { plugins: ['autoprefixer'] }
     }
   }
 
@@ -142,19 +155,19 @@ export async function loadConfig(workingDir: string): Promise<Config> {
 }
 
 /** load and upgrade the import maps from `import_map.json` */
-export async function loadAndUpgradeImportMap(workingDir: string): Promise<ImportMap> {
+export async function loadImportMap(workingDir: string): Promise<ImportMap> {
   const importMap: ImportMap = { imports: {}, scopes: {} }
   let importMapFile = ''
   for (const filename of Array.from(['import_map', 'import-map', 'importmap']).map(name => `${name}.json`)) {
     importMapFile = join(workingDir, filename)
-    if (existsFileSync(importMapFile)) {
+    if (await existsFile(importMapFile)) {
       try {
         const data = JSON.parse(await Deno.readTextFile(importMapFile))
-        const imports: Record<string, string> = toPlainStringRecord(data.imports)
+        const imports: Record<string, string> = toStringRecord(data.imports)
         const scopes: Record<string, Record<string, string>> = {}
         if (util.isPlainObject(data.scopes)) {
           Object.entries(data.scopes).forEach(([scope, imports]) => {
-            scopes[scope] = toPlainStringRecord(imports)
+            scopes[scope] = toStringRecord(imports)
           })
         }
         Object.assign(importMap, { imports, scopes })
@@ -168,37 +181,16 @@ export async function loadAndUpgradeImportMap(workingDir: string): Promise<Impor
     }
   }
 
-  const upgrade: { name: string, url: string }[] = []
-  for (const [name, url] of Object.entries(importMap.imports)) {
-    if (url.startsWith('https://deno.land/x/aleph')) {
-      const a = url.split('aleph')[1].split('/')
-      const version = util.trimPrefix(a.shift()!, '@v')
-      if (version !== VERSION && a.length > 0) {
-        upgrade.push({ name, url: `https://deno.land/x/aleph@v${VERSION}/${a.join('/')}` })
-      }
-    }
-  }
-
-  if (upgrade.length > 0) {
-    log.info(`upgraded ${basename(importMapFile)} to ${bold(VERSION)}`)
-    upgrade.forEach(({ name, url }) => {
-      importMap.imports[name] = url
-    })
-    await Deno.writeTextFile(importMapFile, JSON.stringify(importMap, undefined, 2))
-  }
-
-  const v = Deno.env.get('ALEPH_DEV')
   const alephPkgUri = getAlephPkgUri()
   const defaultImports: Record<string, string> = {
     'aleph/': `${alephPkgUri}/`,
     'framework': `${alephPkgUri}/framework/core/mod.ts`,
     'framework/react': `${alephPkgUri}/framework/react/mod.ts`,
     'react': `https://esm.sh/react@${defaultReactVersion}`,
-    'react-dom': `https://esm.sh/react-dom@${defaultReactVersion}`,
-    'react-dom/server': `https://esm.sh/react-dom@${defaultReactVersion}/server`,
+    'react-dom': `https://esm.sh/react-dom@${defaultReactVersion}`
   }
   // in aleph dev mode, use default imports instead of app settings
-  if (v !== undefined) {
+  if (Deno.env.get('ALEPH_DEV') !== undefined) {
     Object.assign(importMap.imports, defaultImports)
   } else {
     importMap.imports = Object.assign(defaultImports, importMap.imports,)
@@ -207,7 +199,27 @@ export async function loadAndUpgradeImportMap(workingDir: string): Promise<Impor
   return importMap
 }
 
+/**
+ * fix config and import map
+ * - respect react version in import map
+ * - fix import map when the `srcDir` does not equal '/'
+ */
+export function fixConfigAndImportMap(config: RequiredConfig, importMap: ImportMap) {
+  Object.keys(importMap.imports).forEach(key => {
+    const url = importMap.imports[key]
+    if (config.srcDir !== '/' && url.startsWith('.' + config.srcDir)) {
+      importMap.imports[key] = '.' + util.trimPrefix(url, '.' + config.srcDir)
+    }
+    if (/react@\d+\.\d+\.\d+(-[a-z0-9\.]+)?$/.test(url)) {
+      config.react.version = url.split('@').pop()!
+    }
+  })
+}
 
+/** checks whether the loader is builtin css loader */
+export function isBuiltinCSSLoader(loader: LoaderPlugin): boolean {
+  return loader === builtinCSSLoader
+}
 
 function isFramework(v: any): v is 'react' {
   switch (v) {
@@ -237,11 +249,12 @@ function isPostcssConfig(v: any): v is { plugins: PostCSSPlugin[] } {
   return util.isPlainObject(v) && util.isArray(v.plugins)
 }
 
+const reLocaleID = /^[a-z]{2}(-[a-zA-Z0-9]+)?$/
 function isLocaleID(v: any): v is string {
   return util.isNEString(v) && reLocaleID.test(v)
 }
 
-function toPlainStringRecord(v: any) {
+function toStringRecord(v: any) {
   const imports: Record<string, string> = {}
   if (util.isPlainObject(v)) {
     Object.entries(v).forEach(([key, value]) => {

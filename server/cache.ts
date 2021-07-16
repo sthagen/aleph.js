@@ -1,26 +1,26 @@
-import { ensureDir } from 'https://deno.land/std@0.93.0/fs/ensure_dir.ts'
-import { createHash } from 'https://deno.land/std@0.93.0/hash/mod.ts'
-import { join } from 'https://deno.land/std@0.93.0/path/mod.ts'
-import { existsFileSync } from '../shared/fs.ts'
+import { ensureDir } from 'https://deno.land/std@0.96.0/fs/ensure_dir.ts'
+import { createHash } from 'https://deno.land/std@0.96.0/hash/mod.ts'
+import { join } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import { existsFile } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
 import { getDenoDir } from './helper.ts'
 
 /** download and cache remote contents */
-export async function cache(url: string, options?: { forceRefresh?: boolean, retryTimes?: number }) {
+export async function cache(url: string, options?: { forceRefresh?: boolean, retryTimes?: number }): Promise<{ content: Uint8Array, contentType: string | null }> {
   const { protocol, hostname, port, pathname, search } = new URL(url)
-  const hashname = createHash('sha256').update(pathname + search).toString()
-  const isLocalhost = hostname === 'localhost' || hostname === '0.0.0.0' || hostname === '127.0.0.1'
+  const isLocalhost = ['localhost', '0.0.0.0', '127.0.0.1'].includes(hostname)
   const cacheDir = join(
     await getDenoDir(),
     'deps',
     util.trimSuffix(protocol, ':'),
     hostname + (port ? '_PORT' + port : '')
   )
+  const hashname = createHash('sha256').update(pathname + search).toString()
   const contentFilepath = join(cacheDir, hashname)
   const metaFilepath = join(cacheDir, hashname + '.metadata.json')
 
-  if (!options?.forceRefresh && !isLocalhost && existsFileSync(contentFilepath) && existsFileSync(metaFilepath)) {
+  if (!options?.forceRefresh && !isLocalhost && await existsFile(contentFilepath) && await existsFile(metaFilepath)) {
     const [content, meta] = await Promise.all([
       Deno.readFile(contentFilepath),
       Deno.readTextFile(metaFilepath),
@@ -48,7 +48,8 @@ export async function cache(url: string, options?: { forceRefresh?: boolean, ret
     try {
       const resp = await fetch(url)
       if (resp.status >= 400) {
-        return Promise.reject(new Error(resp.statusText))
+        err = new Error(resp.statusText)
+        continue
       }
       const buffer = await resp.arrayBuffer()
       const content = new Uint8Array(buffer)

@@ -1,9 +1,10 @@
-import { basename, dirname } from 'https://deno.land/std@0.93.0/path/mod.ts'
+import { basename, dirname } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import { moduleExts } from '../framework/core/module.ts'
 import { createBlankRouterURL, RouteModule } from '../framework/core/routing.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
 import type { RouterURL } from '../types.ts'
-import type { Application } from './app.ts'
+import type { Application, Module } from './app.ts'
 
 export type SSRData = {
   expires: number
@@ -29,7 +30,7 @@ export type FrameworkRenderer = {
     url: RouterURL,
     AppComponent: any,
     nestedPageComponents: { url: string, Component?: any }[],
-    styles: Record<string, string>
+    styles: Record<string, { css?: string, href?: string }>
   ): Promise<FrameworkRenderResult>
 }
 
@@ -47,6 +48,17 @@ export class Renderer {
 
   setFrameworkRenderer(renderer: FrameworkRenderer) {
     this.#renderer = renderer
+  }
+
+  private findModuleByName(name: string): Module | null {
+    for (const ext of moduleExts) {
+      const url = `/${name}.${ext}`
+      const mod = this.#app.getModule(url)
+      if (mod) {
+        return mod
+      }
+    }
+    return null
   }
 
   async useCache(
@@ -97,14 +109,14 @@ export class Renderer {
     const start = performance.now()
     const isDev = this.#app.isDev
     const state = { entryFile: '' }
-    const appModule = this.#app.findModuleByName('app')
-    const { default: App } = appModule ? await import(`file://${appModule.jsFile}#${appModule.hash.slice(0, 8)}`) : {} as any
+    const appModule = this.findModuleByName('app')
+    const { default: App } = appModule ? await this.#app.importModule(appModule) : {} as any
     const nestedPageComponents = await Promise.all(nestedModules
       .filter(({ url }) => this.#app.getModule(url) !== null)
       .map(async ({ url }) => {
-        const { jsFile, hash } = this.#app.getModule(url)!
-        const { default: Component } = await import(`file://${jsFile}#${hash.slice(0, 8)}`)
-        state.entryFile = dirname(url) + '/' + basename(jsFile)
+        const module = this.#app.getModule(url)!
+        const { default: Component } = await this.#app.importModule(module)
+        state.entryFile = dirname(url) + '/' + basename(module.jsFile)
         return {
           url,
           Component
@@ -116,8 +128,9 @@ export class Renderer {
       nestedModules.map(({ url }) => url)
     ].flat())
 
-
+    // ensure working directory
     Deno.chdir(this.#app.workingDir)
+
     const { head, body, data, scripts } = await this.#renderer.render(
       url,
       App,
@@ -156,10 +169,10 @@ export class Renderer {
 
   /** render custom 404 page. */
   async render404Page(url: RouterURL): Promise<string> {
-    const appModule = this.#app.findModuleByName('app')
-    const e404Module = this.#app.findModuleByName('404')
-    const { default: App } = appModule ? await import(`file://${appModule.jsFile}#${appModule.hash.slice(0, 8)}`) : {} as any
-    const { default: E404 } = e404Module ? await import(`file://${e404Module.jsFile}#${e404Module.hash.slice(0, 8)}`) : {} as any
+    const appModule = this.findModuleByName('app')
+    const e404Module = this.findModuleByName('404')
+    const { default: App } = appModule ? await this.#app.importModule(appModule) : {} as any
+    const { default: E404 } = e404Module ? await this.#app.importModule(e404Module) : {} as any
     const styles = await this.lookupStyleModules(...[
       appModule ? appModule.url : [],
       e404Module ? e404Module.url : []
@@ -195,10 +208,10 @@ export class Renderer {
   /** render custom loading page for SPA mode. */
   async renderSPAIndexPage(): Promise<string> {
     const { basePath, defaultLocale } = this.#app.config
-    const loadingModule = this.#app.findModuleByName('loading')
+    const loadingModule = this.findModuleByName('loading')
 
     if (loadingModule) {
-      const { default: Loading } = await import(`file://${loadingModule.jsFile}#${loadingModule.hash.slice(0, 8)}`)
+      const { default: Loading } = await this.#app.importModule(loadingModule)
       const styles = await this.lookupStyleModules(loadingModule.url)
       const {
         head,
@@ -236,14 +249,23 @@ export class Renderer {
     })
   }
 
-  private async lookupStyleModules(...urls: string[]): Promise<Record<string, string>> {
-    return (await Promise.all(this.#app.lookupStyleModules(...urls).map(async ({ jsFile, hash }) => {
-      const { default: { __url$: url, __css$: css } } = await import(`file://${jsFile}#${hash.slice(0, 8)}`)
-      return { url, css }
-    }))).reduce((styles, mod) => {
-      styles[mod.url] = mod.css
+  private async lookupStyleModules(...urls: string[]): Promise<Record<string, { css?: string, href?: string }>> {
+    const mods: Module[] = []
+    urls.forEach(url => {
+      this.#app.lookupDeps(url, ({ url }) => {
+        const mod = this.#app.getModule(url)
+        if (mod && mod.isStyle) {
+          mods.push({ ...mod, deps: [...mod.deps] })
+        }
+      })
+    })
+    return (await Promise.all(mods.map(async module => {
+      const { css, href } = await this.#app.importModule(module)
+      return { url: module.url, css, href }
+    }))).reduce((styles, { url, css, href }) => {
+      styles[url] = { css, href }
       return styles
-    }, {} as Record<string, string>)
+    }, {} as Record<string, { css?: string, href?: string }>)
   }
 }
 
@@ -268,9 +290,9 @@ function createHtml({
   const headTags = head.map(tag => tag.trim()).concat(scripts.map(v => {
     if (!util.isString(v) && util.isNEString(v.src)) {
       if (v.type === 'module') {
-        return `<link rel="modulepreload" href=${JSON.stringify(util.cleanPath(v.src))} />`
+        return `<link rel="modulepreload" href=${JSON.stringify(v.src)} />`
       } else if (!v.nomodule) {
-        return `<link rel="preload" href=${JSON.stringify(util.cleanPath(v.src))} as="script" />`
+        return `<link rel="preload" href=${JSON.stringify(v.src)} as="script" />`
       }
     }
     return ''
@@ -282,7 +304,7 @@ function createHtml({
       const { innerText, ...rest } = v
       return `<script${formatAttrs(rest)}>${eol}${innerText}${eol}${indent}</script>`
     } else if (util.isNEString(v.src) && !v.preload) {
-      return `<script${formatAttrs({ ...v, src: util.cleanPath(v.src) })}></script>`
+      return `<script${formatAttrs(v)}></script>`
     } else {
       return ''
     }

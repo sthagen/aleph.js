@@ -1,9 +1,7 @@
-import { red } from 'https://deno.land/std@0.93.0/fmt/colors.ts'
-import { dirname, join } from 'https://deno.land/std@0.93.0/path/mod.ts'
-import { existsSync } from 'https://deno.land/std@0.93.0/fs/exists.ts'
+import { red } from 'https://deno.land/std@0.96.0/fmt/colors.ts'
+import { dirname, join } from 'https://deno.land/std@0.96.0/path/mod.ts'
+import { existsSync } from 'https://deno.land/std@0.96.0/fs/exists.ts'
 import { VERSION } from '../version.ts'
-
-const versionMetaUrl = 'https://cdn.deno.land/aleph/meta/versions.json'
 
 export const helpMessage = `
 Usage:
@@ -16,6 +14,8 @@ Options:
 
 export default async function (version = 'latest', forceUpgrade = false) {
   console.log('Looking up latest version...')
+
+  const versionMetaUrl = 'https://cdn.deno.land/aleph/meta/versions.json'
   const { latest, versions } = await (await fetch(versionMetaUrl)).json()
   if (version === 'latest') {
     version = latest
@@ -39,10 +39,10 @@ export default async function (version = 'latest', forceUpgrade = false) {
       denoExecPath,
       'install',
       '-A',
-      '-f',
       '--unstable',
+      '--location', 'http://0.0.0.0/',
       '-n', 'aleph',
-      '--location', 'https://deno.land/x/aleph',
+      '-f',
       `https://deno.land/x/aleph@${version}/cli.ts`
     ],
     stdout: 'null',

@@ -7,7 +7,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
-} from 'react'
+} from 'https://esm.sh/react@17.0.2'
 import util from '../../../shared/util.ts'
 import events from '../../core/events.ts'
 import { redirect } from '../../core/redirect.ts'
@@ -64,13 +64,13 @@ export default function Anchor(props: AnchorProps) {
     if (p !== pathname) {
       return false
     }
-    if (q) {
-      const search = new URLSearchParams(q)
-      search.sort()
-      if (search.toString() !== query.toString()) {
-        return false
-      }
+
+    const search = new URLSearchParams(q)
+    search.sort()
+    if (search.toString() !== query.toString()) {
+      return false
     }
+
     return true
   }, [pathname, params, query, propHref])
   const className = useMemo(() => {
@@ -143,7 +143,7 @@ export default function Anchor(props: AnchorProps) {
   )
 }
 
-function isModifiedEvent(event: React.MouseEvent): boolean {
+function isModifiedEvent(event: MouseEvent): boolean {
   const { target } = event.currentTarget as any
   const nativeEvent = event.nativeEvent as any
   return (

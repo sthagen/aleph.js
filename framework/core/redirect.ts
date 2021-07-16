@@ -1,6 +1,18 @@
 import util from '../../shared/util.ts'
 import events from './events.ts'
 
+const routerState = {
+  ready: false,
+  hasPreRedirect: false,
+}
+
+events.once('routerstate', state => {
+  if (routerState.hasPreRedirect) {
+    events.emit('popstate', { type: 'popstate', resetScroll: true })
+  }
+  Object.assign(routerState, state)
+})
+
 export async function redirect(url: string, replace?: boolean) {
   const { location, history } = window as any
 
@@ -19,5 +31,10 @@ export async function redirect(url: string, replace?: boolean) {
   } else {
     history.pushState(null, '', url)
   }
-  events.emit('popstate', { type: 'popstate', resetScroll: true })
+
+  if (routerState.ready) {
+    events.emit('popstate', { type: 'popstate', resetScroll: true })
+  } else if (!routerState.hasPreRedirect) {
+    routerState.hasPreRedirect = true
+  }
 }

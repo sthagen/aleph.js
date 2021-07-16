@@ -1,62 +1,7 @@
-import type { Status } from 'https://deno.land/std@0.93.0/http/http_status.ts'
-import type { BufReader, BufWriter } from 'https://deno.land/std@0.93.0/io/bufio.ts'
-import type { MultipartFormData } from 'https://deno.land/std@0.93.0/mime/multipart.ts'
-import { Plugin, PluginCreator } from 'https://esm.sh/postcss@8.2.8'
-
-/**
- * A loader plugin to load source media.
- */
-export type LoaderPlugin = {
-  /** `name` gives the plugin a name. */
-  name: string
-  /** `type` specifies the plugin type. */
-  type: 'loader'
-  /** `test` matches the import url. */
-  test: RegExp
-  /** `acceptHMR` enables the HMR. */
-  acceptHMR?: boolean
-  /** allowPage` allows the loaded module as a page. */
-  allowPage?: boolean
-  /** `pagePathReoslve` resolves the page path. */
-  pagePathResolve?(url: string): { path: string, isIndex?: boolean }
-  /** `resolve` resolves the module content. */
-  resolve?(url: string): Uint8Array | Promise<Uint8Array>
-  /** `transform` transforms the source content. */
-  transform?(input: { url: string, content: Uint8Array, map?: Uint8Array }): LoaderTransformOutput | Promise<LoaderTransformOutput>
-}
-
-/**
- * The result of loader transform.
- */
-export type LoaderTransformOutput = {
-  /** The transformed code type (default is 'js'). */
-  type?: 'css' | 'js' | 'jsx' | 'ts' | 'tsx'
-  /** The transformed code. */
-  code: string
-  /** The source map. */
-  map?: string
-}
-
-/**
- * A server plugin to enhance the aleph server application.
- */
-export type ServerPlugin = {
-  /** `name` gives the plugin a name. */
-  name: string
-  /** `type` specifies the plugin type. */
-  type: 'server'
-  /** `onInit` will be invoked after the server initiated. */
-  onInit(app: ServerApplication): Promise<void> | void
-}
-
-export type PostCSSPlugin = string | [string, any] | Plugin | PluginCreator<any>
-
-export type BuildTarget = 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020' | 'esnext'
-
-export type BrowserTarget = {
-  name: 'chrome' | 'edge' | 'firefox' | 'ios' | 'Safari'
-  version: string
-}
+import type { Status } from 'https://deno.land/std@0.96.0/http/http_status.ts'
+import type { BufReader, BufWriter } from 'https://deno.land/std@0.96.0/io/bufio.ts'
+import type { MultipartFormData } from 'https://deno.land/std@0.96.0/mime/multipart.ts'
+import { Plugin, PluginCreator } from 'https://esm.sh/postcss@8.2.12'
 
 /**
  * The config for the aleph server application.
@@ -67,7 +12,7 @@ export type Config = {
   /** `buildTarget` specifies the build target in production mode (default is [**es2015**]). */
   buildTarget?: BuildTarget
   /** `browserslist` specifies the target browsers for esbuild. */
-  browserslist?: BrowserTarget[]
+  browserslist?: BrowsersList
   /** `basePath` specifies the path prefix for the application (default is '/'). */
   basePath?: string
   /** `srcDir` specifies the **src** dir (default is '/'). */
@@ -95,11 +40,100 @@ export type Config = {
 }
 
 /**
- * The config for CSS resolve.
+ * A loader plugin to load source media.
+ */
+export type LoaderPlugin = {
+  /** `name` gives the plugin a name. */
+  name: string
+  /** `type` specifies the plugin type. */
+  type: 'loader'
+  /** `test` matches the import url. */
+  test: RegExp
+  /** `acceptHMR` enables the HMR. */
+  acceptHMR?: boolean
+  /** allowPage` allows to load the module as a page. */
+  allowPage?: boolean
+  /** `resove` resolves the module url. */
+  resolve?(url: string): ResolveResult
+  /** `load` loads the source content. */
+  load?(input: { url: string, data?: any }, app: ServerApplication): LoaderOutput | Promise<LoaderOutput>
+}
+
+/**
+ * A server plugin to enhance the aleph server application.
+ */
+export type ServerPlugin = {
+  /** `name` gives the plugin a name. */
+  name: string
+  /** `type` specifies the plugin type. */
+  type: 'server'
+  /** `setup` setups the plugin. */
+  setup(app: ServerApplication): Promise<void> | void
+}
+
+/**
+ * The Plugin for postcss.
+ */
+export type PostCSSPlugin = string | [string, any] | Plugin | PluginCreator<any>
+
+/**
+ * The result of loader resove.
+ */
+export type ResolveResult = {
+  url: string,
+  external?: boolean,
+  pagePath?: string,
+  isIndex?: boolean
+  data?: any,
+}
+
+/**
+ * The output of loader.
+ */
+export type LoaderOutput = {
+  /** The transformed code type (default is 'js'). */
+  type?: 'css' | 'js' | 'jsx' | 'ts' | 'tsx'
+  /** The transformed code. */
+  code: string
+  /** The source map. */
+  map?: string
+}
+
+/**
+ * The built target for build phase.
+ */
+export type BuildTarget = 'es2015' | 'es2016' | 'es2017' | 'es2018' | 'es2019' | 'es2020' | 'esnext'
+
+/**
+ * The borwser names for esbuild.
+ */
+export type BrowserNames = 'chrome' | 'edge' | 'firefox' | 'ios' | 'safari'
+
+/**
+ * The borwser names list for esbuild.
+ */
+export type BrowsersList = {
+  [key in BrowserNames]?: number
+}
+
+/**
+ * The import maps.
+ */
+export type ImportMap = {
+  imports: Record<string, string>
+  scopes: Record<string, Record<string, string>>
+}
+
+/**
+ * The config for CSS loader.
  */
 export type CSSOptions = {
+  /** `extractSize` specifies the extract size (default is 8k). */
+  extractSize?: number
+  /** `remoteExternal` loads remote css as external when it is true. */
+  remoteExternal?: boolean
   /** `module` enables the css module feature. */
-  modules?: false | CSSModulesOptions
+  modules?: boolean | CSSModulesOptions
   /** `postcss` specifies the postcss plugins. */
   postcss?: { plugins: PostCSSPlugin[] }
 }
@@ -130,14 +164,15 @@ export type SSROptions = {
  * An interface that aligns to the parts of the aleph server's `Application`.
  */
 export interface ServerApplication {
-  readonly workingDir: string
   readonly mode: 'development' | 'production'
+  readonly workingDir: string
+  readonly buildDir: string
   readonly config: Required<Config>
-  addModule(url: string, options?: { code?: string }): Promise<void>
-  injectCode(
-    stage: 'compilation' | 'hmr' | 'ssr',
-    transform: (url: string, code: string) => string
-  ): void
+  readonly importMap: ImportMap
+  addModule(url: string, sourceCode?: string): Promise<void>
+  addDist(path: string, content: Uint8Array): Promise<void>
+  fetch(url: string): Promise<{ content: Uint8Array, contentType: string | null }>
+  injectCode(stage: 'compilation' | 'hmr' | 'ssr', transform: (url: string, code: string) => string): void
 }
 
 /**
@@ -217,6 +252,7 @@ export type RouterURL = {
   readonly pathname: string
   readonly params: Record<string, string>
   readonly query: URLSearchParams
+  toString(): string
   push(url: string): void
   replace(url: string): void
 }

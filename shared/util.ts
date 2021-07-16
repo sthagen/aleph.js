@@ -1,6 +1,4 @@
 export default {
-  inDeno: typeof Deno !== 'undefined' && typeof Deno.version?.deno === 'string',
-  supportSymbolFor: typeof Symbol === 'function' && typeof Symbol.for === 'function',
   isString(a: any): a is string {
     return typeof a === 'string'
   },
@@ -41,6 +39,21 @@ export default {
       return [s.slice(0, i), s.slice(i + 1)]
     }
     return [s, '']
+  },
+  btoaUrl(s: string) {
+    return btoa(s).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
+  },
+  atobUrl(b64: string) {
+    const b = b64.length % 4
+    if (b === 3) {
+      b64 += '='
+    } else if (b === 2) {
+      b64 += '=='
+    } else if (b === 1) {
+      throw new TypeError('Illegal base64 Url String')
+    }
+    b64 = b64.replace(/\-/g, '+').replace(/_/g, '/')
+    return atob(b64)
   },
   formatBytes(bytes: number) {
     if (bytes < 1024) {
