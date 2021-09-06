@@ -5,12 +5,13 @@ import { walk } from 'https://deno.land/std@0.106.0/fs/walk.ts'
 import { createHash } from 'https://deno.land/std@0.106.0/hash/mod.ts'
 import { basename, dirname, extname, join, resolve } from 'https://deno.land/std@0.106.0/path/mod.ts'
 import { Bundler, bundlerRuntimeCode, simpleJSMinify } from '../bundler/mod.ts'
-import type { TransformOptions } from '../compiler/mod.ts'
-import { wasmChecksum, parseExportNames, SourceType, transform, stripSsrCode } from '../compiler/mod.ts'
+import type { TransformOptions, TransformResult, ModuleSource } from '../compiler/mod.ts'
+import { wasmChecksum, parseExportNames, SourceType, fastTransform, transform, stripSsrCode } from '../compiler/mod.ts'
 import { EventEmitter } from '../framework/core/events.ts'
 import { builtinModuleExts, toPagePath, trimBuiltinModuleExts } from '../framework/core/module.ts'
 import { Routing } from '../framework/core/routing.ts'
-import cssPlugin, { cssLoader } from '../plugins/css.ts'
+import { frameworks } from '../framework/mod.ts'
+import { cssLoader } from '../plugins/css.ts'
 import { ensureTextFile, existsDir, existsFile, lazyRemove } from '../shared/fs.ts'
 import log, { Measure } from '../shared/log.ts'
 import util from '../shared/util.ts'
@@ -21,17 +22,11 @@ import { cache } from './cache.ts'
 import type { RequiredConfig } from './config.ts'
 import { defaultConfig, fixConfigAndImportMap, getDefaultImportMap, loadConfig, loadImportMap } from './config.ts'
 import {
-  checkAlephDev, checkDenoVersion, clearBuildCache, computeHash, findFile,
-  getAlephPkgUri, getSourceType, isLocalUrl, moduleExclude, toLocalPath, toRelativePath
+  checkAlephDev, checkDenoVersion, clearBuildCache, computeHash, decoder, encoder, findFile,
+  getAlephPkgUri, getSourceType, isLocalUrl, moduleExclude, toLocalPath, toRelativePath,
 } from './helper.ts'
 import { getContentType } from './mime.ts'
 import { buildHtml, Renderer } from './renderer.ts'
-
-type ModuleSource = {
-  code: string
-  type: SourceType
-  map?: string
-}
 
 type CompileOptions = {
   source?: ModuleSource,
@@ -194,7 +189,6 @@ export class Aleph implements IAleph {
     ms.stop(`init env`)
 
     // apply plugins
-    cssPlugin().setup(this)
     await Promise.all(
       this.#config.plugins.map(async plugin => {
         await plugin.setup(this)
@@ -213,18 +207,15 @@ export class Aleph implements IAleph {
     }
 
     // init framework
-    const { init } = await import(`../framework/${this.#config.framework}/init.ts`)
-    await init(this)
-
+    await frameworks[this.#config.framework].init(this)
     // compile and import framework renderer
     if (this.#config.ssr) {
-      const mod = await this.compile(`${alephPkgUri}/framework/${this.#config.framework}/renderer.ts`)
+      const mod = await this.compile(`${getAlephPkgUri()}/framework/${this.#config.framework}/renderer.ts`)
       const { render } = await this.importModule(mod)
       if (util.isFunction(render)) {
         this.#renderer.setFrameworkRenderer({ render })
       }
     }
-
     ms.stop(`init ${this.#config.framework} framework`)
 
     const appFile = await findFile(srcDir, builtinModuleExts.map(ext => `app.${ext}`))
@@ -800,7 +791,7 @@ export class Aleph implements IAleph {
     if (sourceType === SourceType.Unknown || sourceType === SourceType.CSS) {
       return []
     }
-    const code = (new TextDecoder).decode(content)
+    const code = decoder.decode(content)
     const names = await parseExportNames(specifier, code, { sourceType })
     return (await Promise.all(names.map(async name => {
       if (name.startsWith('{') && name.endsWith('}')) {
@@ -822,14 +813,14 @@ export class Aleph implements IAleph {
   /** common compiler options */
   get commonCompilerOptions(): TransformOptions {
     return {
-      workingDir: this.#workingDir,
       alephPkgUri: getAlephPkgUri(),
+      workingDir: this.#workingDir,
       importMap: this.#importMap,
       inlineStylePreprocess: async (key: string, type: string, tpl: string) => {
         if (type !== 'css') {
           for (const { test, load } of this.#loadListeners) {
             if (test.test(`.${type}`)) {
-              const { code, type: codeType } = await load({ specifier: key, data: (new TextEncoder).encode(tpl) })
+              const { code, type: codeType } = await load({ specifier: key, data: encoder.encode(tpl) })
               if (codeType === 'css') {
                 type = 'css'
                 tpl = code
@@ -838,7 +829,7 @@ export class Aleph implements IAleph {
             }
           }
         }
-        const { code } = await cssLoader({ specifier: key, data: (new TextEncoder).encode(tpl) }, this)
+        const { code } = await cssLoader({ specifier: key, data: encoder.encode(tpl) }, this)
         return code
       },
       isDev: this.isDev,
@@ -971,7 +962,7 @@ export class Aleph implements IAleph {
       return module.jsBuffer
     }
 
-    let code = new TextDecoder().decode(module.jsBuffer)
+    let code = decoder.decode(module.jsBuffer)
     if (module.denoHooks?.length || module.ssrPropsFn || module.ssgPathsFn) {
       if ('csrCode' in module) {
         code = (module as any).csrCode
@@ -994,7 +985,7 @@ export class Aleph implements IAleph {
         // todo: merge source map
       }
     }
-    return new TextEncoder().encode([
+    return encoder.encode([
       `import.meta.hot = $createHotContext(${JSON.stringify(specifier)});`,
       '',
       code,
@@ -1077,7 +1068,7 @@ export class Aleph implements IAleph {
       const source = await this.fetchModule(specifier)
       sourceType = getSourceType(specifier, source.contentType || undefined)
       if (sourceType !== SourceType.Unknown) {
-        sourceCode = (new TextDecoder).decode(source.content)
+        sourceCode = decoder.decode(source.content)
       }
     }
 
@@ -1227,6 +1218,8 @@ export class Aleph implements IAleph {
         return
       }
 
+      const ms = new Measure()
+
       if (source.type === SourceType.CSS) {
         const { code, map } = await cssLoader({ specifier, data: source.code }, this)
         source.code = code
@@ -1235,16 +1228,31 @@ export class Aleph implements IAleph {
         module.isStyle = true
       }
 
-      const ms = new Measure()
-      const encoder = new TextEncoder()
-      const { code, deps = [], denoHooks, ssrPropsFn, ssgPathsFn, starExports, jsxStaticClassNames, map } = await transform(specifier, source.code, {
-        ...this.commonCompilerOptions,
-        sourceMap: this.isDev,
-        swcOptions: {
-          sourceType: source.type
-        },
-        httpExternal
-      })
+      let ret: TransformResult
+      // use `fastTransform` when the module is remote non-jsx module in `development` mode
+      if (this.isDev && util.isLikelyHttpURL(specifier) && source.type !== SourceType.JSX && source.type !== SourceType.TSX) {
+        ret = await fastTransform(specifier, source, { react: this.#config.react })
+      } else {
+        ret = await transform(specifier, source.code, {
+          ...this.commonCompilerOptions,
+          sourceMap: this.isDev,
+          swcOptions: {
+            sourceType: source.type
+          },
+          httpExternal
+        })
+      }
+
+      const {
+        code,
+        deps = [],
+        denoHooks,
+        ssrPropsFn,
+        ssgPathsFn,
+        starExports,
+        jsxStaticClassNames,
+        map
+      } = ret
 
       let jsCode = code
       let sourceMap = map
@@ -1407,7 +1415,7 @@ export class Aleph implements IAleph {
 
   /** replace dep hash in the `jsBuffer` and remove `csrCode` cache if it exits */
   private async replaceDepHash(module: Module, hashLoc: number, hash: string) {
-    const hashData = (new TextEncoder()).encode(hash.substr(0, 6))
+    const hashData = encoder.encode(hash.substr(0, 6))
     const jsBuffer = await this.getModuleJS(module)
     if (jsBuffer && !equals(hashData, jsBuffer.slice(hashLoc, hashLoc + 6))) {
       copy(hashData, jsBuffer, hashLoc)
@@ -1442,6 +1450,7 @@ export class Aleph implements IAleph {
       ])
     }
   }
+
 
   /** create bundled chunks for production. */
   private async bundle() {
