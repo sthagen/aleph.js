@@ -2,7 +2,7 @@ import { dim, red, yellow } from 'https://deno.land/std@0.106.0/fmt/colors.ts'
 import { createHash } from 'https://deno.land/std@0.106.0/hash/mod.ts'
 import { dirname, basename, extname, join, relative } from 'https://deno.land/std@0.106.0/path/mod.ts'
 import { minDenoVersion } from '../shared/constants.ts'
-import { existsFile, existsDir } from '../shared/fs.ts'
+import { existsDir } from '../shared/fs.ts'
 import log from '../shared/log.ts'
 import util from '../shared/util.ts'
 import { SourceType } from '../compiler/mod.ts'
@@ -66,16 +66,6 @@ export function isLocalUrl(url: string): boolean {
   return reLocalUrl.test(url)
 }
 
-export async function findFile(wd: string, filenames: string[]) {
-  for (const filename of filenames) {
-    const fullPath = join(wd, filename)
-    if (await existsFile(fullPath)) {
-      return fullPath
-    }
-  }
-  return null
-}
-
 /** get the deno cache dir. */
 export async function getDenoDir() {
   if (_denoDir !== null) {
@@ -83,7 +73,7 @@ export async function getDenoDir() {
   }
 
   const p = Deno.run({
-    cmd: [Deno.execPath(), 'info', '--json', '--unstable'],
+    cmd: [Deno.execPath(), 'info', '--json'],
     stdout: 'piped',
     stderr: 'null'
   })
@@ -108,11 +98,11 @@ export function getAlephPkgUri() {
 
 /** get the relative path from `from` to `to`. */
 export function toRelativePath(from: string, to: string): string {
-  const r = relative(from, to).replaceAll('\\', '/')
-  if (!r.startsWith('.') && !r.startsWith('/')) {
-    return './' + r
+  const p = relative(from, to).replaceAll('\\', '/')
+  if (!p.startsWith('.') && !p.startsWith('/')) {
+    return './' + p
   }
-  return r
+  return p
 }
 
 /** get source type by given url and content type. */

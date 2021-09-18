@@ -1,4 +1,4 @@
-import React, { ComponentType } from 'react'
+import React, { FC } from 'react'
 
 const links = {
   'Home': '/',
@@ -13,7 +13,7 @@ const links = {
   'Dark Green': '/colors/darkgreen?text=orange',
 }
 
-export default function App({ Page, pageProps }: { Page: ComponentType<any>, pageProps: any }) {
+export default function App({ Page, pageProps }: { Page: FC, pageProps: any }) {
   return (
     <main>
       <head>

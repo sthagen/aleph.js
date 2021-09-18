@@ -1,4 +1,5 @@
 import React, { FC } from 'react'
+import './style/index.css'
 
 export default function App({ Page, pageProps }: { Page: FC, pageProps: any }) {
   return (

@@ -1,6 +1,6 @@
-import React, { FC } from 'react'
+import React, { ComponentType } from 'react'
 
-export default function App({ Page, pageProps }: { Page: FC, pageProps: any }) {
+export default function App({ Page, pageProps }: { Page: ComponentType<any>, pageProps: any }) {
   return (
     <main>
       <head>

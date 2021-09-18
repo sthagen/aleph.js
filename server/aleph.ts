@@ -12,17 +12,17 @@ import { builtinModuleExts, toPagePath, trimBuiltinModuleExts } from '../framewo
 import { Routing } from '../framework/core/routing.ts'
 import { frameworks } from '../framework/mod.ts'
 import { cssLoader } from '../plugins/css.ts'
-import { ensureTextFile, existsDir, existsFile, lazyRemove } from '../shared/fs.ts'
+import { ensureTextFile, existsDir, existsFile, findFile, lazyRemove } from '../shared/fs.ts'
 import log, { Measure } from '../shared/log.ts'
 import util from '../shared/util.ts'
-import type { Aleph as IAleph, DependencyDescriptor, ImportMap, LoadInput, LoadOutput, Module, RouterURL, ResolveResult, TransformInput, TransformOutput, SSRData, RenderOutput } from '../types.d.ts'
+import type { APIHandler, Aleph as IAleph, DependencyDescriptor, ImportMap, LoadInput, LoadOutput, Module, RouterURL, ResolveResult, TransformInput, TransformOutput, SSRData, RenderOutput } from '../types.d.ts'
 import { VERSION } from '../version.ts'
 import { Analyzer } from './analyzer.ts'
 import { cache } from './cache.ts'
 import type { RequiredConfig } from './config.ts'
-import { defaultConfig, fixConfigAndImportMap, getDefaultImportMap, loadConfig, loadImportMap } from './config.ts'
+import { defaultConfig, fixConfig, getDefaultImportMap, loadConfig, loadImportMap } from './config.ts'
 import {
-  checkAlephDev, checkDenoVersion, clearBuildCache, computeHash, decoder, encoder, findFile,
+  checkAlephDev, checkDenoVersion, clearBuildCache, computeHash, decoder, encoder,
   getAlephPkgUri, getSourceType, isLocalUrl, moduleExclude, toLocalPath, toRelativePath,
 } from './helper.ts'
 import { getContentType } from './mime.ts'
@@ -105,15 +105,16 @@ export class Aleph implements IAleph {
       Object.assign(this.#importMap, getDefaultImportMap())
     }
     if (configFile) {
-      if (!configFile.endsWith('.json')) {
-        const mod = await this.compile(`/${basename(configFile)}`, { httpExternal: true })
-        configFile = join(this.#buildDir, mod.jsFile)
-      }
       Object.assign(this.#config, await loadConfig(configFile))
-      this.#pageRouting = new Routing(this.#config)
+      const { basePath, i18n, server: { rewrites } } = this.#config
+      this.#pageRouting = new Routing({
+        basePath,
+        i18n,
+        rewrites,
+      })
     }
 
-    await fixConfigAndImportMap(this.#workingDir, this.#config, this.#importMap, importMapFile)
+    await fixConfig(this.#workingDir, this.#config, this.#importMap)
     ms.stop('load config')
 
     Deno.env.set('ALEPH_ENV', this.#mode)
@@ -302,11 +303,6 @@ export class Aleph implements IAleph {
       if (this.#modules.has(specifier)) {
         try {
           const prevModule = this.#modules.get(specifier)!
-          if (prevModule.jsFile === '/aleph.config.js') {
-            log.info(`${prevModule.specifier.slice(1)} has be changed, please restart the server.`)
-            return
-          }
-
           const module = await this.compile(specifier, {
             forceRefresh: true,
             ignoreDeps: true,
@@ -325,7 +321,7 @@ export class Aleph implements IAleph {
               e.emit('modify-' + module.specifier, { refreshPage: refreshPage || undefined })
             })
           }
-          this.applyCompilationSideEffect(module, (m) => {
+          this.applyCompilationSideEffect(module, () => {
             if (!hmrable && this.isHMRable(specifier)) {
               log.debug(`compilation side-effect: ${specifier} ${dim('<-')} ${module.specifier}(${module.sourceHash.substr(0, 6)})`)
               this.#fsWatchListeners.forEach(e => {
@@ -342,18 +338,18 @@ export class Aleph implements IAleph {
       } else {
         let routePath: string | undefined = undefined
         let isIndex: boolean | undefined = undefined
-        let unrouted = false
+        let emitHMR = false
         if (this.isPageModule(specifier)) {
-          unrouted = true
+          emitHMR = true
           this.#pageRouting.lookup(routes => {
             routes.forEach(({ module }) => {
               if (module === specifier) {
-                unrouted = false
+                emitHMR = false
                 return false // break loop
               }
             })
           })
-          if (unrouted) {
+          if (emitHMR) {
             const [_routePath, _specifier, _isIndex] = this.createRouteUpdate(specifier)
             routePath = _routePath
             specifier = _specifier
@@ -361,24 +357,24 @@ export class Aleph implements IAleph {
             this.#pageRouting.update(routePath, specifier, isIndex)
           }
         } else if (specifier.startsWith('/api/') && !specifier.startsWith('/api/_middlewares.')) {
-          unrouted = true
-          this.#pageRouting.lookup(routes => {
+          let routeExists = false
+          this.#apiRouting.lookup(routes => {
             routes.forEach(({ module }) => {
               if (module === specifier) {
-                unrouted = false
+                routeExists = true
                 return false // break loop
               }
             })
           })
-          if (unrouted) {
+          if (!routeExists) {
             this.#apiRouting.update(...this.createRouteUpdate(specifier))
           }
         }
         if (trimBuiltinModuleExts(specifier) === '/app') {
           await this.compile(specifier)
-          unrouted = true
+          emitHMR = true
         }
-        if (unrouted) {
+        if (emitHMR) {
           this.#fsWatchListeners.forEach(e => {
             e.emit('add', { specifier, routePath, isIndex })
           })
@@ -489,17 +485,16 @@ export class Aleph implements IAleph {
   }
 
   /** get api route by the given location. */
-  async getAPIRoute(location: { pathname: string, search?: string }): Promise<[RouterURL, Module] | null> {
+  async getAPIRoute(location: { pathname: string, search?: string }): Promise<[RouterURL, APIHandler] | null> {
     const router = this.#apiRouting.createRouter(location)
     if (router !== null) {
       const [url, nestedModules] = router
       if (url.routePath !== '') {
         const specifier = nestedModules.pop()!
-        if (this.#modules.has(specifier)) {
-          return [url, this.#modules.get(specifier)!]
-        }
-        const module = await this.compile(specifier, { httpExternal: true })
-        return [url, module]
+        const filepath = join(this.#workingDir, this.#config.srcDir, util.trimPrefix(specifier, 'file://'))
+        const qs = this.isDev ? '?mtime=' + (await Deno.lstat(filepath)).mtime?.getTime() : ''
+        const { handler } = await import(`file://${filepath}${qs}`)
+        return [url, handler]
       }
     }
     return null
@@ -525,7 +520,7 @@ export class Aleph implements IAleph {
   async addModule(specifier: string, sourceCode: string, forceRefresh?: boolean): Promise<Module> {
     let sourceType = getSourceType(specifier)
     if (sourceType === SourceType.Unknown) {
-      throw new Error("addModule: unknown souce type")
+      throw new Error("addModule: unknown source type")
     }
     const source = {
       code: sourceCode,
@@ -644,7 +639,7 @@ export class Aleph implements IAleph {
   async #renderPage(url: RouterURL, nestedModules: string[]): Promise<[string, Record<string, SSRData> | null]> {
     let [html, data] = await this.#renderer.renderPage(url, nestedModules)
     for (const callback of this.#renderListeners) {
-      callback({ path: url.toString(), html, data })
+      await callback({ path: url.toString(), html, data })
     }
     return [buildHtml(html, !this.isDev), data]
   }
@@ -669,16 +664,15 @@ export class Aleph implements IAleph {
   async createMainJS(bundleMode = false): Promise<string> {
     const alephPkgUri = getAlephPkgUri()
     const alephPkgPath = alephPkgUri.replace('https://', '').replace('http://localhost:', 'http_localhost_')
-    const { framework, basePath: basePath, i18n: { defaultLocale } } = this.#config
+    const { framework, basePath, i18n, ssr, server: { rewrites } } = this.#config
     const { routes } = this.#pageRouting
     const config: Record<string, any> = {
+      renderMode: ssr ? 'ssr' : 'spa',
       basePath,
       appModule: this.#appModule?.specifier,
       routes,
-      renderMode: this.#config.ssr ? 'ssr' : 'spa',
-      defaultLocale,
-      locales: [],
-      rewrites: this.#config.server.rewrites,
+      i18n,
+      rewrites: rewrites,
     }
 
     let code: string
@@ -938,7 +932,7 @@ export class Aleph implements IAleph {
   async importModule<T = any>(module: Module): Promise<T> {
     const path = join(this.#buildDir, module.jsFile)
     const hash = this.computeModuleHash(module)
-    if (existsFile(path)) {
+    if (await existsFile(path)) {
       return await import(`file://${path}#${(hash).slice(0, 6)}`)
     }
     throw new Error(`import ${module.specifier}: file not found: ${path}`)
@@ -947,9 +941,9 @@ export class Aleph implements IAleph {
   async getModuleJS(module: Module, injectHMRCode = false): Promise<Uint8Array | null> {
     const { specifier, jsFile, jsBuffer } = module
     if (!jsBuffer) {
-      const cacheFp = join(this.#buildDir, jsFile)
-      if (await existsFile(cacheFp)) {
-        module.jsBuffer = await Deno.readFile(cacheFp)
+      const cacheFile = join(this.#buildDir, jsFile)
+      if (await existsFile(cacheFile)) {
+        module.jsBuffer = await Deno.readFile(cacheFile)
         log.debug(`load '${jsFile}'` + dim(' • ' + util.formatBytes(module.jsBuffer.length)))
       }
     }
@@ -1129,10 +1123,9 @@ export class Aleph implements IAleph {
 
     const isRemote = util.isLikelyHttpURL(specifier) && !isLocalUrl(specifier)
     const localPath = toLocalPath(specifier)
-    const name = trimBuiltinModuleExts(basename(localPath))
-    const jsFile = join(dirname(localPath), `${name}.js`)
-    const cacheFp = join(this.#buildDir, jsFile)
-    const metaFp = cacheFp.slice(0, -3) + '.meta.json'
+    const jsFile = trimBuiltinModuleExts(localPath) + '.js'
+    const cacheFile = join(this.#buildDir, jsFile)
+    const metaFile = cacheFile.slice(0, -3) + '.meta.json'
     const isNew = !mod
 
     let defer = (err?: Error) => { }
@@ -1162,14 +1155,14 @@ export class Aleph implements IAleph {
       this.#appModule = mod
     }
 
-    if (!forceRefresh && await existsFile(metaFp)) {
+    if (!forceRefresh && await existsFile(metaFile)) {
       try {
-        const meta = JSON.parse(await Deno.readTextFile(metaFp))
+        const meta = JSON.parse(await Deno.readTextFile(metaFile))
         if (meta.specifier === specifier && util.isFilledString(meta.sourceHash) && util.isArray(meta.deps)) {
           Object.assign(mod, meta)
         } else {
-          log.warn(`removing invalid metadata '${name}.meta.json'`)
-          Deno.remove(metaFp)
+          log.warn(`removing invalid metadata of '${basename(specifier)}'`)
+          Deno.remove(metaFile)
         }
       } catch (e) { }
     }
@@ -1179,7 +1172,7 @@ export class Aleph implements IAleph {
       return [mod, null]
     }
 
-    if (!isRemote || this.#reloading || mod.sourceHash === '' || !await existsFile(cacheFp)) {
+    if (!isRemote || this.#reloading || mod.sourceHash === '' || !await existsFile(cacheFile)) {
       try {
         const src = customSource || await this.resolveModuleSource(specifier, data)
         const sourceHash = computeHash(src.code)
@@ -1439,18 +1432,17 @@ export class Aleph implements IAleph {
   private async cacheModule(module: Module, sourceMap?: string) {
     const { jsBuffer, jsFile, ready, ...rest } = module
     if (jsBuffer) {
-      const cacheFp = join(this.#buildDir, jsFile)
-      const metaFp = cacheFp.slice(0, -3) + '.meta.json'
-      await ensureDir(dirname(cacheFp))
+      const cacheFile = join(this.#buildDir, jsFile)
+      const metaFile = cacheFile.slice(0, -3) + '.meta.json'
+      await ensureDir(dirname(cacheFile))
       await Promise.all([
-        Deno.writeFile(cacheFp, jsBuffer),
-        Deno.writeTextFile(metaFp, JSON.stringify({ ...rest }, undefined, 2)),
-        sourceMap ? Deno.writeTextFile(`${cacheFp}.map`, sourceMap) : Promise.resolve(),
-        lazyRemove(cacheFp.slice(0, -3) + '.bundling.js'),
+        Deno.writeFile(cacheFile, jsBuffer),
+        Deno.writeTextFile(metaFile, JSON.stringify({ ...rest }, undefined, 2)),
+        sourceMap ? Deno.writeTextFile(`${cacheFile}.map`, sourceMap) : Promise.resolve(),
+        lazyRemove(cacheFile.slice(0, -3) + '.bundling.js'),
       ])
     }
   }
-
 
   /** create bundled chunks for production. */
   private async bundle() {
@@ -1504,7 +1496,7 @@ export class Aleph implements IAleph {
     }
 
     // render route pages
-    await Promise.all(Array.from(paths).map(loc => ([loc, ...locales.map(locale => ({ ...loc, pathname: locale + loc.pathname }))])).flat().map(async ({ pathname, search }) => {
+    await Promise.all(Array.from(paths).map(loc => ([loc, ...locales.map(locale => ({ ...loc, pathname: '/' + locale + loc.pathname }))])).flat().map(async ({ pathname, search }) => {
       if (this.isSSRable(pathname)) {
         const [router, nestedModules] = this.#pageRouting.createRouter({ pathname, search })
         if (router.routePath !== '') {
